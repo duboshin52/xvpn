@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>xvpn</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+:root{--bg:var(--tg-theme-bg-color,#fff);--bg2:var(--tg-theme-secondary-bg-color,#f2f2f7);--tx:var(--tg-theme-text-color,#000);
+--hint:var(--tg-theme-hint-color,#8e8e93);--acc:var(--tg-theme-button-color,#2481cc);--acc-tx:var(--tg-theme-button-text-color,#fff);
+--red:#e5484d;--green:#30a46c;--orange:#f76b15}
+*{box-sizing:border-box}body{margin:0;font:15px/1.4 -apple-system,system-ui,Roboto,sans-serif;background:var(--bg2);color:var(--tx)}
+nav{display:flex;position:sticky;top:0;background:var(--bg);border-bottom:1px solid #0001;z-index:5}
+nav button{flex:1;padding:12px 4px;border:0;background:none;color:var(--hint);font-size:14px}
+nav button.on{color:var(--acc);box-shadow:inset 0 -2px var(--acc)}
+main{padding:12px}.card{background:var(--bg);border-radius:12px;padding:12px;margin-bottom:10px}
+.row{display:flex;align-items:center;gap:8px}.sp{flex:1}.hint{color:var(--hint);font-size:13px}
+.big{font-size:22px;font-weight:600}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.bar{height:6px;background:var(--bg2);border-radius:3px;overflow:hidden;margin-top:4px}.bar i{display:block;height:100%;background:var(--acc)}
+button.b{border:0;border-radius:10px;padding:10px 14px;background:var(--acc);color:var(--acc-tx);font-size:14px}
+button.s{background:var(--bg2);color:var(--tx)}button.r{background:var(--red);color:#fff}
+input{width:100%;padding:10px;border-radius:10px;border:1px solid #0002;background:var(--bg2);color:var(--tx);font-size:15px;margin:4px 0 8px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}.st-active{background:var(--green)}.st-disabled{background:var(--hint)}
+.st-expired,.st-limit{background:var(--red)}.pill{font-size:12px;padding:2px 8px;border-radius:10px;background:var(--bg2)}
+.list>.card{cursor:pointer}.wrap{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+#modal{position:fixed;inset:0;background:#0006;display:none;align-items:flex-end;z-index:10}
+#modal>div{background:var(--bg);width:100%;max-height:90vh;overflow:auto;border-radius:16px 16px 0 0;padding:16px}
+code{word-break:break-all;font-size:12px;background:var(--bg2);padding:6px;border-radius:6px;display:block;margin:4px 0}
+#qr{display:flex;justify-content:center;margin:8px 0}#qr img{background:#fff;padding:8px;border-radius:8px}
+</style>
+</head>
+<body>
+<nav><button data-t="status" class="on">Статус</button><button data-t="keys">Ключи</button>
+<button data-t="servers">Серверы</button><button data-t="admins">Админы</button></nav>
+<main id="v"><div class="hint">Загрузка…</div></main>
+<div id="modal" onclick="if(event.target===this)closeM()"><div id="m"></div></div>
+<script>
+const tg = window.Telegram.WebApp; tg.ready(); tg.expand();
+const BASE = location.pathname.replace(/\/$/, '');
+let ME = null, TAB = 'status', KEYS = [];
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function fb(n){n=+n||0;const u=['Б','КБ','МБ','ГБ','ТБ'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return (i?n.toFixed(1):n)+' '+u[i]}
+const pct=(a,b)=>b?Math.min(100,Math.round(a*100/b)):0;
+const dt=t=>t?new Date(t*1000).toLocaleDateString('ru-RU'):'∞';
+function up(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600);return d?`${d}д ${h}ч`:`${h}ч ${Math.floor(s%3600/60)}м`}
+async function api(path, method='GET', body){
+  const r = await fetch(BASE+'/api'+path,{method,headers:{'X-Init-Data':tg.initData,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  if(!r.ok){const t=await r.text();let m=t;try{m=JSON.parse(t).detail}catch(e){}throw new Error(m||r.status)}
+  return r.json();
+}
+function toast(m){tg.showAlert?tg.showAlert(String(m)):alert(m)}
+function ask(m){return new Promise(r=>tg.showConfirm?tg.showConfirm(m,r):r(confirm(m)))}
+function openM(h){$('#m').innerHTML=h;$('#modal').style.display='flex'}
+function closeM(){$('#modal').style.display='none'}
+function copy(t){navigator.clipboard.writeText(t).then(()=>tg.HapticFeedback?.notificationOccurred('success'),()=>toast(t))}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');TAB=b.dataset.t;render()});
+
+async function render(){
+  try{ await ({status:rStatus,keys:rKeys,servers:rServers,admins:rAdmins})[TAB]() }
+  catch(e){ $('#v').innerHTML=`<div class="card">Ошибка: ${esc(e.message)}</div>` }
+}
+
+async function rStatus(){
+  const o = await api('/overview');
+  let h = `<div class="grid">
+   <div class="card"><div class="hint">Ключи активны</div><div class="big">${o.keys_active}/${o.keys_total}</div></div>
+   <div class="card"><div class="hint">Онлайн (3 мин)</div><div class="big">${o.keys_online}</div></div></div>
+   <div class="card"><div class="hint">Трафик всего</div><div class="big">${fb(o.traffic_total)}</div></div>`;
+  for(const s of o.servers){
+    const st=s.status;
+    h+=`<div class="card"><div class="row"><span class="dot ${s.online?'st-active':'st-expired'}"></span><b>${esc(s.name)}</b>
+     <span class="sp"></span><span class="pill">${s.info?esc(s.info.domain):''}</span></div>`;
+    if(st&&s.online){
+      h+=`<div class="hint" style="margin-top:6px">Xray: ${st.xray.active?'работает':'<b style="color:var(--red)">остановлен</b>'} · ${esc(st.xray.version)} · ключей ${st.xray.users}</div>
+      <div style="margin-top:6px">CPU ${st.cpu.toFixed(0)}% (${st.cores} ядер, LA ${st.load[0].toFixed(2)})<div class="bar"><i style="width:${st.cpu}%"></i></div></div>
+      <div style="margin-top:6px">RAM ${fb(st.ram.used)} / ${fb(st.ram.total)}<div class="bar"><i style="width:${pct(st.ram.used,st.ram.total)}%"></i></div></div>
+      <div style="margin-top:6px">Диск ${fb(st.disk.used)} / ${fb(st.disk.total)}<div class="bar"><i style="width:${pct(st.disk.used,st.disk.total)}%"></i></div></div>
+      <div class="hint" style="margin-top:6px">Сеть ↑${fb(st.net.sent)} ↓${fb(st.net.recv)} · аптайм ${up(st.uptime)}</div>`;
+    } else h+=`<div class="hint">Нет связи с агентом${s.last_seen?' с '+new Date(s.last_seen*1000).toLocaleString('ru-RU'):''}</div>`;
+    h+=`<div class="wrap"><button class="b s" onclick="restart(${s.id})">Перезапустить Xray</button></div></div>`;
+  }
+  if(!o.servers.length) h+=`<div class="card hint">Серверов нет — добавьте во вкладке «Серверы».</div>`;
+  h+=`<button class="b s" style="width:100%" onclick="syncNow()">Синхронизировать сейчас</button>`;
+  $('#v').innerHTML=h;
+}
+async function restart(id){if(await ask('Перезапустить Xray? Соединения кратко прервутся.')){try{await api(`/servers/${id}/restart`,'POST');toast('Готово')}catch(e){toast(e.message)}}}
+async function syncNow(){try{await api('/sync','POST');render()}catch(e){toast(e.message)}}
+
+const ST={active:'активен',disabled:'выключен',expired:'истёк',limit:'лимит'};
+async function rKeys(){
+  KEYS = await api('/keys');
+  let h=`<div class="row" style="margin-bottom:10px"><input id="f" placeholder="Поиск" oninput="rKeyList()" style="margin:0"><button class="b" onclick="newKey()">+ Ключ</button></div><div class="list" id="kl"></div>`;
+  $('#v').innerHTML=h; rKeyList();
+}
+function rKeyList(){
+  const f=($('#f')?.value||'').toLowerCase();
+  $('#kl').innerHTML = KEYS.filter(k=>k.name.toLowerCase().includes(f)).map(k=>`
+   <div class="card" onclick="keyM(${k.id})"><div class="row"><span class="dot st-${k.state}"></span><b>${esc(k.name)}</b>
+   ${k.online?'<span class="pill" style="color:var(--green)">онлайн</span>':''}<span class="sp"></span><span class="hint">${ST[k.state]}</span></div>
+   <div class="hint" style="margin-top:4px">${fb(k.used_bytes)} / ${k.limit_bytes?fb(k.limit_bytes):'∞'} · до ${dt(k.expire_at)}</div>
+   ${k.limit_bytes?`<div class="bar"><i style="width:${pct(k.used_bytes,k.limit_bytes)}%"></i></div>`:''}</div>`).join('') || '<div class="card hint">Ключей нет</div>';
+}
+function newKey(){
+  openM(`<b>Новый ключ</b><div class="hint" style="margin-top:8px">Имя</div><input id="kn" placeholder="например, mama-phone">
+  <div class="grid"><div><div class="hint">Дней (0 = бессрочно)</div><input id="kd" type="number" value="30"></div>
+  <div><div class="hint">ГБ (0 = безлимит)</div><input id="kg" type="number" value="0"></div></div>
+  <button class="b" style="width:100%" onclick="doNewKey()">Создать</button>`);
+  setTimeout(()=>$('#kn').focus(),100);
+}
+async function doNewKey(){
+  try{const k=await api('/keys','POST',{name:$('#kn').value,days:+$('#kd').value,gb:+$('#kg').value});closeM();await rKeys();keyM(k.id)}catch(e){toast(e.message)}
+}
+async function keyM(id){
+  const k=KEYS.find(x=>x.id===id); const L=await api(`/keys/${id}/links`);
+  openM(`<div class="row"><span class="dot st-${k.state}"></span><b>${esc(k.name)}</b><span class="sp"></span><span class="hint">${ST[k.state]}</span></div>
+  <div class="hint">Трафик ${fb(k.used_bytes)} / ${k.limit_bytes?fb(k.limit_bytes):'∞'} · до ${dt(k.expire_at)}${k.last_active?' · был активен '+new Date(k.last_active*1000).toLocaleString('ru-RU'):''}</div>
+  <div id="qr"></div>
+  <div class="hint">Ссылка-подписка (Happ, Hiddify, v2rayN, v2RayTun)</div><code onclick="copy(this.textContent)">${esc(L.sub_url)}</code>
+  <div class="wrap"><button class="b" onclick="copy('${esc(L.sub_url)}')">Копировать подписку</button></div>
+  <details style="margin-top:10px"><summary class="hint">Отдельные ключи (${L.links.length})</summary>
+  ${L.links.map(l=>`<code onclick="copy(this.textContent)">${esc(l)}</code>`).join('')}</details>
+  <div class="hint" style="margin-top:12px">Управление</div>
+  <div class="wrap">
+   <button class="b s" onclick="kEdit(${id},{add_days:30})">+30 дней</button>
+   <button class="b s" onclick="kEdit(${id},{add_days:7})">+7 дней</button>
+   <button class="b s" onclick="kEdit(${id},{unlimited_time:1})">Бессрочно</button>
+   <button class="b s" onclick="kLimit(${id})">Лимит ГБ</button>
+   <button class="b s" onclick="kEdit(${id},{reset_traffic:1})">Сбросить трафик</button>
+   <button class="b s" onclick="kRename(${id})">Переименовать</button>
+   <button class="b s" onclick="kEdit(${id},{enabled:${k.enabled?0:1}})">${k.enabled?'Выключить':'Включить'}</button>
+   <button class="b s" onclick="kRegen(${id})">Перевыпустить</button>
+   <button class="b r" onclick="kDel(${id})">Удалить</button></div>`);
+  new QRCode($('#qr'),{text:L.sub_url,width:200,height:200});
+}
+async function kEdit(id,b){try{await api(`/keys/${id}`,'PATCH',b);await rKeys();keyM(id)}catch(e){toast(e.message)}}
+function inputM(title,val,type,cb){window._icb=cb;openM(`<b>${esc(title)}</b><input id="iv" type="${type}" value="${esc(val)}"><button class="b" style="width:100%" onclick="window._icb($('#iv').value)">OK</button>`);setTimeout(()=>$('#iv').focus(),100)}
+function kLimit(id){inputM('Лимит в ГБ (0 = безлимит)','0','number',v=>kEdit(id,{limit_gb:+v}))}
+function kRename(id){inputM('Новое имя','','text',v=>v&&kEdit(id,{name:v}))}
+async function kRegen(id){if(await ask('Старая ссылка перестанет работать. Перевыпустить?'))kEdit(id,{regen:1})}
+async function kDel(id){if(await ask('Удалить ключ?')){await api(`/keys/${id}`,'DELETE');closeM();rKeys()}}
+
+async function rServers(){
+  const o=await api('/overview');
+  let h=o.servers.map(s=>`<div class="card"><div class="row"><span class="dot ${s.online?'st-active':'st-expired'}"></span><b>${esc(s.name)}</b><span class="sp"></span>
+   <span class="pill">${s.enabled?'в подписке':'скрыт'}</span></div>
+   <div class="hint" style="margin-top:4px">${s.info?`${esc(s.info.domain)} · IP ${esc(s.info.ip)}<br>Reality SNI: ${esc(s.info.reality.sni_tcp)} / ${esc(s.info.reality.sni_xhttp)}`:''}<br>Агент: ${esc(s.url)}</div>
+   ${ME.is_owner?`<div class="wrap"><button class="b s" onclick="sEdit(${s.id},{enabled:${s.enabled?0:1}})">${s.enabled?'Скрыть из подписок':'Вернуть в подписки'}</button>
+   <button class="b s" onclick="sEdit(${s.id},{refresh_info:1})">Обновить параметры</button>
+   <button class="b s" onclick="sRen(${s.id})">Переименовать</button>
+   <button class="b r" onclick="sDel(${s.id})">Удалить</button></div>`:''}</div>`).join('');
+  if(ME.is_owner) h+=`<div class="card"><b>Добавить сервер</b><div class="hint">Данные выводит install.sh в режиме node</div>
+   <input id="sn" placeholder="Название, напр. NL-1"><input id="su" placeholder="URL агента https://…"><input id="ss" placeholder="Секрет агента">
+   <button class="b" style="width:100%" onclick="sAdd()">Добавить</button></div>`;
+  $('#v').innerHTML=h||'<div class="card hint">Серверов нет</div>';
+}
+async function sAdd(){try{await api('/servers','POST',{name:$('#sn').value,url:$('#su').value,secret:$('#ss').value});rServers()}catch(e){toast(e.message)}}
+async function sEdit(id,b){try{await api(`/servers/${id}`,'PATCH',b);rServers()}catch(e){toast(e.message)}}
+function sRen(id){inputM('Новое имя','','text',v=>{closeM();v&&sEdit(id,{name:v})})}
+async function sDel(id){if(await ask('Удалить сервер из панели? (на самом сервере ничего не удаляется)')){await api(`/servers/${id}`,'DELETE');rServers()}}
+
+async function rAdmins(){
+  const a=await api('/admins');
+  let h=a.map(x=>`<div class="card row"><span>${x.is_owner?'👑':'👤'}</span><div><b>${esc(x.name||'—')}</b><div class="hint">${x.tg_id}</div></div><span class="sp"></span>
+   ${ME.is_owner&&!x.is_owner?`<button class="b r" onclick="aDel(${x.tg_id})">Убрать</button>`:''}</div>`).join('');
+  if(ME.is_owner) h+=`<div class="card"><b>Добавить админа</b><div class="hint">Telegram ID можно узнать командой /id в боте</div>
+   <input id="ai" type="number" placeholder="Telegram ID"><input id="an" placeholder="Имя (необязательно)">
+   <button class="b" style="width:100%" onclick="aAdd()">Добавить</button></div>`;
+  else h+=`<div class="card hint">Добавлять админов может только владелец.</div>`;
+  $('#v').innerHTML=h;
+}
+async function aAdd(){try{await api('/admins','POST',{tg_id:+$('#ai').value,name:$('#an').value});rAdmins()}catch(e){toast(e.message)}}
+async function aDel(id){if(await ask('Убрать админа?')){await api(`/admins/${id}`,'DELETE');rAdmins()}}
+
+(async()=>{
+  if(!tg.initData){$('#v').innerHTML='<div class="card">Откройте панель из Telegram-бота.</div>';return}
+  try{ME=await api('/me')}catch(e){$('#v').innerHTML=`<div class="card">Нет доступа: ${esc(e.message)}</div>`;return}
+  render(); setInterval(()=>{if(TAB==='status'&&$('#modal').style.display!=='flex')render()},15000);
+})();
+</script>
+</body>
+</html>
