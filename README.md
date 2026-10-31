@@ -44,6 +44,39 @@ bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install
 
 **Без вопросов**: ответы можно передать переменными, например `DOMAIN=vpn.site.ru CF_API_TOKEN=... BOT_TOKEN=... OWNER_ID=... bash <(curl ...) panel`.
 
+## Каскад: Россия → Европа (обход белых списков)
+
+Клиент подключается к российскому серверу (например, Yandex Cloud: его IP есть в белых списках мобильных операторов), тот пересылает трафик на зарубежный. Российские сайты открываются напрямую с российского сервера. Скрипт `cascade.sh` работает отдельно от панели.
+
+```
+клиент ──VLESS+Reality+Vision (SNI ya.ru)──▶ RU-сервер ──VLESS+XHTTP+Reality──▶ EU-сервер ──▶ интернет
+                                                │
+                                                └──▶ .ru / .рф / geoip:ru — напрямую
+```
+
+**1. Зарубежный сервер** (Ubuntu, root):
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/cascade.sh) exit
+```
+В конце скрипт выведет ссылку `vless://…`, она нужна для шага 2. Если на сервере уже стоит нода xvpn, этот шаг не нужен: создайте в панели ключ `ru-bridge` и возьмите его ссылку Reality или XHTTP-Reality.
+
+Если у сервера только IPv6, скрипт сам временно включит DNS64, чтобы скачать Xray с GitHub, и настроит Cloudflare WARP для выхода на IPv4-сайты. У российского сервера в этом случае тоже должен быть IPv6.
+
+**2. Российский сервер** (Ubuntu, `sudo -i`):
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/cascade.sh) bridge
+```
+Скрипт спросит ссылку из шага 1, SNI (по умолчанию `ya.ru`, это должен быть сайт из белого списка) и имя первого клиента. Потом покажет ссылку клиента и QR-код. В группе безопасности облака откройте TCP 443.
+
+**Управление** (на российском сервере):
+```bash
+xvpn-cascade add ИМЯ    # новый клиент
+xvpn-cascade del ИМЯ    # удалить клиента
+xvpn-cascade links      # показать ссылки
+xvpn-cascade update     # обновить Xray
+```
+Ответы на вопросы можно передать переменными: `UPSTREAM='vless://…' SNI=ya.ru CLIENT=phone bash <(curl …) bridge`.
+
 ## Мини-апп
 
 - **Статус**: CPU, RAM, диск, сеть, аптайм, состояние Xray на каждом сервере, перезапуск Xray, число онлайн-ключей, общий трафик.
