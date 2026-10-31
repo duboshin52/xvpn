@@ -6,6 +6,7 @@
 #   bash install.sh info    — показать данные для подключения ноды
 # Все вопросы можно заранее задать переменными окружения (DOMAIN, BOT_TOKEN, OWNER_ID, CERT_FILE, KEY_FILE, SNI_TCP, SNI_XHTTP, NODE_NAME).
 set -euo pipefail
+trap 'printf "\033[1;31m✘ Ошибка в строке %s: %s\033[0m\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT=/opt/xvpn
@@ -60,16 +61,28 @@ if [[ "$MODE" == info ]]; then show_info; exit 0; fi
 
 install_packages() {
   c "Пакеты…"
-  export DEBIAN_FRONTEND=noninteractive
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
   apt-get update -qq
   apt-get install -y -qq curl openssl jq nginx libnginx-mod-stream python3 python3-venv python3-pip ca-certificates >/dev/null
 }
 
 install_xray() {
   c "Xray-core (официальный установщик XTLS)…"
-  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null
-  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null
-  ok "$(/usr/local/bin/xray version | head -1)"
+  local inst
+  inst=$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) \
+    || die "Не удалось скачать установщик Xray"
+  # установщик XTLS может вернуть ненулевой код и при успехе — проверяем результат сами
+  bash -c "$inst" @ install >>/var/log/xvpn-install.log 2>&1 || true
+  bash -c "$inst" @ install-geodata >>/var/log/xvpn-install.log 2>&1 || true
+  [[ -x /usr/local/bin/xray ]] || die "Xray не установился, см. /var/log/xvpn-install.log"
+  if [[ ! -s /usr/local/share/xray/geoip.dat ]]; then
+    mkdir -p /usr/local/share/xray
+    curl -fsSL -o /usr/local/share/xray/geoip.dat \
+      https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat || true
+    curl -fsSL -o /usr/local/share/xray/geosite.dat \
+      https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat || true
+  fi
+  ok "$(/usr/local/bin/xray version 2>/dev/null | sed -n 1p)"
 }
 
 enable_bbr() {
