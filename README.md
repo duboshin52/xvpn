@@ -12,14 +12,19 @@
 
 Все три протокола работают на порту 443: nginx разводит подключения по SNI.
 
-## Подготовка в Cloudflare (для каждого сервера)
+## Подготовка в Cloudflare
 
-1. DNS → A-запись `vpn.ваш-домен` → IP сервера, **Proxied** (оранжевое облако).
-2. SSL/TLS → Overview → **Full (strict)**.
-3. SSL/TLS → Origin Server → **Create Certificate** на 15 лет. Сертификат и ключ установщик попросит вставить.
-4. Network → **gRPC: On** (нужно для потокового режима XHTTP; без него клиент сам переключится на packet-up).
+Домен должен быть добавлен в Cloudflare. Остальное установщик сделает сам через API: A-запись с проксированием, SSL Full (strict), gRPC и Origin-сертификат на 15 лет. Закрытый ключ создаётся на сервере и никуда не отправляется.
 
-Для второго сервера нужен свой поддомен, например `nl.ваш-домен`.
+Нужен API-токен: https://dash.cloudflare.com/profile/api-tokens → **Create Token** → **Create Custom Token**, права:
+- Zone → Zone → Read
+- Zone → DNS → Edit
+- Zone → Zone Settings → Edit
+- Zone → SSL and Certificates → Edit
+
+В Zone Resources выберите свой домен. Токен вводится при установке и на сервере не сохраняется. Без токена (нажать Enter) установщик попросит вставить сертификат вручную.
+
+Для второго сервера используйте свой поддомен, например `nl.ваш-домен`.
 
 ## Установка (Ubuntu 22.04/24.04, root)
 
@@ -27,7 +32,7 @@
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) panel
 ```
-Установщик спросит домен, SNI для Reality, сертификат, токен бота (от @BotFather) и ваш Telegram ID (узнать у @userinfobot). Потом откройте бота, нажмите /start → «Открыть панель».
+Установщик спросит домен, SNI для Reality, токен Cloudflare, токен бота (от @BotFather) и ваш Telegram ID (узнать у @userinfobot). Потом откройте бота, нажмите /start → «Открыть панель».
 
 **Дополнительный сервер**:
 ```bash
@@ -37,7 +42,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install
 
 **Обновление** (код, Xray, зависимости): та же команда с `update` вместо `panel`.
 
-**Без вопросов**: ответы можно передать переменными, например `DOMAIN=vpn.site.ru BOT_TOKEN=... OWNER_ID=... CERT_FILE=/root/cert.pem KEY_FILE=/root/key.pem bash <(curl ...) panel`.
+**Без вопросов**: ответы можно передать переменными, например `DOMAIN=vpn.site.ru CF_API_TOKEN=... BOT_TOKEN=... OWNER_ID=... bash <(curl ...) panel`.
 
 ## Мини-апп
 

@@ -99,6 +99,53 @@ copy_code() {
   fi
 }
 
+cf_api() { # cf_api METHOD path [json]
+  curl -sS -X "$1" "https://api.cloudflare.com/client/v4$2" \
+    -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" ${3:+--data "$3"}
+}
+
+cf_setup() {
+  c "Настраиваю Cloudflare…"
+  local zone="" zid="" d="$DOMAIN" r rid csr
+  # ищем зону: sub.example.com → example.com
+  while [[ "$d" == *.* ]]; do
+    zid=$(cf_api GET "/zones?name=$d" | jq -r '.result[0].id // empty')
+    [[ -n "$zid" ]] && { zone=$d; break; }
+    d=${d#*.}
+  done
+  [[ -n "$zid" ]] || die "Зона для $DOMAIN не найдена в Cloudflare (проверьте токен и что домен добавлен в аккаунт)"
+  ok "Зона $zone"
+
+  # A-запись с проксированием
+  local body
+  body=$(jq -nc --arg n "$DOMAIN" --arg ip "$SERVER_IP" '{type:"A",name:$n,content:$ip,proxied:true,ttl:1}')
+  rid=$(cf_api GET "/zones/$zid/dns_records?type=A&name=$DOMAIN" | jq -r '.result[0].id // empty')
+  if [[ -n "$rid" ]]; then r=$(cf_api PUT "/zones/$zid/dns_records/$rid" "$body")
+  else r=$(cf_api POST "/zones/$zid/dns_records" "$body"); fi
+  [[ $(jq -r .success <<<"$r") == true ]] || die "DNS: $(jq -c .errors <<<"$r")"
+  ok "DNS: $DOMAIN → $SERVER_IP (через Cloudflare)"
+
+  r=$(cf_api PATCH "/zones/$zid/settings/ssl" '{"value":"strict"}')
+  [[ $(jq -r .success <<<"$r") == true ]] && ok "SSL/TLS: Full (strict)" \
+    || echo "⚠ SSL Full (strict) не включился: $(jq -c .errors <<<"$r") — включите вручную"
+  r=$(cf_api PATCH "/zones/$zid/settings/grpc" '{"value":"on"}')
+  [[ $(jq -r .success <<<"$r") == true ]] && ok "gRPC: On" \
+    || echo "⚠ gRPC не включился через API — включите вручную (Network → gRPC), это не критично"
+
+  # Origin-сертификат на 15 лет; закрытый ключ создаётся здесь и не покидает сервер
+  openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout "$ETC/key.pem" -out "$ETC/req.csr" -subj "/CN=$DOMAIN" 2>/dev/null
+  chmod 600 "$ETC/key.pem"
+  csr=$(cat "$ETC/req.csr")
+  body=$(jq -nc --arg csr "$csr" --arg n "$DOMAIN" \
+    '{csr:$csr,hostnames:[$n],request_type:"origin-ecc",requested_validity:5475}')
+  r=$(cf_api POST "/certificates" "$body")
+  [[ $(jq -r .success <<<"$r") == true ]] || die "Origin-сертификат: $(jq -c .errors <<<"$r")"
+  jq -r .result.certificate <<<"$r" >"$ETC/cert.pem"
+  rm -f "$ETC/req.csr"
+  ok "Origin-сертификат выпущен (до $(jq -r .result.expires_on <<<"$r"))"
+}
+
 configure_node() {
   mkdir -p "$ETC" && chmod 700 "$ETC"
   if [[ -f "$ETC/node.env" ]]; then
@@ -142,11 +189,19 @@ EOF
   # сертификат Cloudflare Origin
   if [[ ! -s "$ETC/cert.pem" || ! -s "$ETC/key.pem" ]]; then
     echo
-    c "Сертификат Cloudflare Origin: Cloudflare → SSL/TLS → Origin Server → Create Certificate"
-    c "(RSA или ECC, хосты: ваш домен и *.домен, срок 15 лет). Режим SSL/TLS: Full (strict)."
-    if [[ -n "${CERT_FILE:-}" && -n "${KEY_FILE:-}" ]]; then
+    if [[ -z "${CF_API_TOKEN+x}" && -z "${CERT_FILE:-}" ]]; then
+      c "Cloudflare можно настроить автоматически (DNS, SSL Full strict, gRPC, Origin-сертификат)."
+      c "Нужен API-токен: dash.cloudflare.com/profile/api-tokens → Create Token → Custom token, права:"
+      c "  Zone:Read, DNS:Edit, Zone Settings:Edit, SSL and Certificates:Edit (Zone Resources: ваш домен)."
+      read -rp "API-токен Cloudflare (Enter — вставить сертификат вручную): " CF_API_TOKEN </dev/tty
+    fi
+    if [[ -n "${CF_API_TOKEN:-}" ]]; then
+      cf_setup
+    elif [[ -n "${CERT_FILE:-}" && -n "${KEY_FILE:-}" ]]; then
       cp "$CERT_FILE" "$ETC/cert.pem"; cp "$KEY_FILE" "$ETC/key.pem"
     else
+      c "Сертификат Cloudflare Origin: Cloudflare → SSL/TLS → Origin Server → Create Certificate"
+      c "(хосты: ваш домен и *.домен, срок 15 лет). Режим SSL/TLS: Full (strict)."
       read_pem "$ETC/cert.pem" "Origin Certificate"
       read_pem "$ETC/key.pem" "Private Key"
     fi
