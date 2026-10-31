@@ -9,10 +9,11 @@ import logging
 import os
 import secrets
 import sqlite3
+import ssl
 import threading
 import time
 import uuid as uuidlib
-from urllib.parse import parse_qsl, quote
+from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
 from aiogram import Bot, Dispatcher, F
@@ -51,6 +52,13 @@ CREATE TABLE IF NOT EXISTS keys(id INTEGER PRIMARY KEY, name TEXT, uuid TEXT, su
   enabled INTEGER DEFAULT 1, created_at INTEGER, created_by INTEGER, last_active INTEGER DEFAULT 0,
   notified INTEGER DEFAULT 0);
 """)
+# миграции: каскад (role = exit|bridge, cert — закреплённый сертификат агента моста,
+# bridge_uuid — служебный пользователь моста на выходах, cascade — нода работает выходом для мостов)
+_cols = {r[1] for r in db.execute("PRAGMA table_info(servers)")}
+for _c, _d in (("role", "TEXT DEFAULT 'exit'"), ("cert", "TEXT"), ("bridge_uuid", "TEXT"),
+               ("cascade", "INTEGER DEFAULT 1")):
+    if _c not in _cols:
+        db.execute(f"ALTER TABLE servers ADD COLUMN {_c} {_d}")
 db.execute("INSERT OR IGNORE INTO admins(tg_id,name,is_owner) VALUES(?,?,1)", (OWNER_ID, "owner"))
 db.commit()
 
@@ -105,6 +113,10 @@ def server_links(srv: dict, k: dict) -> list[str]:
         return []
     u, n, r = k["uuid"], srv["name"], info["reality"]
     tag = lambda t: quote(f"{n} {t} | {k['name']}")
+    if info.get("role") == "bridge":
+        return [f"vless://{u}@{info['ip']}:{info.get('port', 443)}?encryption=none&security=reality"
+                f"&sni={r['sni_tcp']}&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}"
+                f"&type=tcp&flow=xtls-rprx-vision#{tag('Каскад')}"]
     return [
         f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
         f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={info['domain']}"
@@ -120,14 +132,48 @@ def server_links(srv: dict, k: dict) -> list[str]:
 
 def key_links(k: dict) -> list[str]:
     out = []
-    for s in q("SELECT * FROM servers WHERE enabled=1 ORDER BY id"):
+    # мосты (каскад) первыми: они работают и при белых списках
+    for s in q("SELECT * FROM servers WHERE enabled=1 ORDER BY role='bridge' DESC, id"):
         out += server_links(s, k)
     return out
 
 
 # ---------------------------------------------------------------- nodes
+_ctx_cache: dict[str, ssl.SSLContext] = {}
+
+
+def pinned_ctx(pem: str) -> ssl.SSLContext:
+    """TLS-контекст, доверяющий ровно одному самоподписанному сертификату агента моста."""
+    if pem not in _ctx_cache:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.load_verify_locations(cadata=pem)
+        _ctx_cache[pem] = ctx
+    return _ctx_cache[pem]
+
+
+def fetch_pinned_cert(url: str, fp: str) -> str:
+    """Скачивает сертификат агента и сверяет SHA-256 отпечаток из кода подключения."""
+    u = urlsplit(url)
+    pem = ssl.get_server_certificate((u.hostname, u.port or 443), timeout=10)
+    got = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest()
+    if not hmac.compare_digest(got, fp.lower().replace(":", "")):
+        raise ValueError("отпечаток сертификата не совпадает — возможна подмена")
+    return pem
+
+
+def parse_code(code: str) -> dict:
+    """Код подключения моста: base64(JSON {u: url, s: secret, f: sha256 отпечаток})."""
+    raw = code.strip()
+    raw += "=" * (-len(raw) % 4)
+    d = json.loads(base64.urlsafe_b64decode(raw))
+    return {"url": d["u"], "secret": d["s"], "fp": d.get("f", "")}
+
+
 async def agent(srv: dict, method: str, path: str, body=None, timeout=15):
-    async with httpx.AsyncClient(timeout=timeout) as c:
+    verify = pinned_ctx(srv["cert"]) if srv.get("cert") else True
+    async with httpx.AsyncClient(timeout=timeout, verify=verify) as c:
         r = await c.request(method, srv["url"].rstrip("/") + path, json=body,
                             headers={"Authorization": f"Bearer {srv['secret']}"})
         r.raise_for_status()
@@ -139,6 +185,42 @@ def active_users() -> list[dict]:
             for k in q("SELECT * FROM keys") if key_state(k) == "active"]
 
 
+def bridge_users() -> list[dict]:
+    """Служебные пользователи мостов: с ними мосты ходят на выходы."""
+    return [{"email": f"b{s['id']}", "uuid": s["bridge_uuid"]}
+            for s in q("SELECT * FROM servers WHERE role='bridge' AND bridge_uuid IS NOT NULL")]
+
+
+def exit_upstreams(bridge: dict) -> list[dict]:
+    """Выходы для моста: каждая нода-выход даёт два пути (XHTTP-Reality и Reality-TCP)."""
+    out = []
+    for s in q("SELECT * FROM servers WHERE role='exit' AND cascade=1 ORDER BY id"):
+        info = json.loads(s["info"] or "{}")
+        if not info.get("ip"):
+            continue
+        r = info["reality"]
+        user = {"id": bridge["bridge_uuid"], "encryption": "none"}
+        vnext = lambda usr: [{"address": info["ip"], "port": 443, "users": [usr]}]
+        out.append({"tag": f"exit-{s['id']}-x", "outbound": {
+            "protocol": "vless", "settings": {"vnext": vnext(user)},
+            "streamSettings": {"network": "xhttp", "security": "reality",
+                               "xhttpSettings": {"path": r["xhttp_path"], "mode": "auto"},
+                               "realitySettings": {"serverName": r["sni_xhttp"], "publicKey": r["public_key"],
+                                                   "shortId": r["short_id"], "fingerprint": "chrome"}}}})
+        out.append({"tag": f"exit-{s['id']}-t", "outbound": {
+            "protocol": "vless", "settings": {"vnext": vnext(user | {"flow": "xtls-rprx-vision"})},
+            "streamSettings": {"network": "tcp", "security": "reality",
+                               "realitySettings": {"serverName": r["sni_tcp"], "publicKey": r["public_key"],
+                                                   "shortId": r["short_id"], "fingerprint": "chrome"}}}})
+    return out
+
+
+def sync_body(srv: dict, users: list[dict]) -> dict:
+    if srv["role"] == "bridge":
+        return {"users": users, "upstreams": exit_upstreams(srv)}
+    return {"users": users + bridge_users()}
+
+
 async def sync_server(srv: dict, users: list[dict]):
     st = await agent(srv, "GET", "/stats")
     now = int(time.time())
@@ -146,13 +228,14 @@ async def sync_server(srv: dict, users: list[dict]):
         total = t["up"] + t["down"]
         if total and email.startswith("k") and email[1:].isdigit():
             qx("UPDATE keys SET used_bytes=used_bytes+?, last_active=? WHERE id=?", (total, now, int(email[1:])))
-    await agent(srv, "POST", "/sync", {"users": users}, timeout=40)
+    await agent(srv, "POST", "/sync", sync_body(srv, users), timeout=40)
     status = await agent(srv, "GET", "/status")
     qx("UPDATE servers SET status=?, last_seen=? WHERE id=?", (json.dumps(status), now, srv["id"]))
 
 
 async def sync_all():
-    servers = q("SELECT * FROM servers WHERE enabled=1")
+    # синхронизируем все ноды: скрытая из подписок нода может работать выходом для моста
+    servers = q("SELECT * FROM servers")
     users = active_users()
     res = await asyncio.gather(*(sync_server(s, users) for s in servers), return_exceptions=True)
     for s, r in zip(servers, res):
@@ -172,7 +255,7 @@ async def sync_all():
                             f"{'истёк срок' if key_state(k) == 'expired' else 'исчерпан трафик'}")
     if newly_off:
         users = active_users()
-        await asyncio.gather(*(agent(s, "POST", "/sync", {"users": users}, timeout=40)
+        await asyncio.gather(*(agent(s, "POST", "/sync", sync_body(s, users), timeout=40)
                                for s in servers), return_exceptions=True)
 
 
@@ -249,9 +332,13 @@ async def cmd_status(m: Message):
         if not s["online"] or not st:
             lines.append(f"🔴 <b>{s['name']}</b> — недоступен")
             continue
-        lines.append(f"{'🟢' if st['xray']['active'] else '🟠'} <b>{s['name']}</b>: CPU {st['cpu']:.0f}% · "
-                     f"RAM {st['ram']['used'] * 100 // st['ram']['total']}% · "
-                     f"ключей {st['xray']['users']}")
+        line = (f"{'🟢' if st['xray']['active'] else '🟠'} {'🌉 ' if s['role'] == 'bridge' else ''}"
+                f"<b>{s['name']}</b>: CPU {st['cpu']:.0f}% · "
+                f"RAM {st['ram']['used'] * 100 // st['ram']['total']}% · ключей {st['xray']['users']}")
+        if s["role"] == "bridge":
+            ex = st.get("exits") or []
+            line += f"\n    выходы: {sum(e['alive'] for e in ex)}/{len(ex)} живы"
+        lines.append(line)
     await m.answer("\n".join(lines) or "Серверов нет", parse_mode="HTML")
 
 
@@ -378,10 +465,19 @@ def api_me(u=Depends(tg_user)):
 def api_overview(u=Depends(tg_user)):
     keys = q("SELECT * FROM keys")
     servers = []
-    for s in q("SELECT * FROM servers ORDER BY id"):
+    names = {s["id"]: s["name"] for s in q("SELECT id,name FROM servers")}
+    for s in q("SELECT * FROM servers ORDER BY role='bridge' DESC, id"):
+        st = json.loads(s["status"] or "null")
+        if st and st.get("exits"):
+            for e in st["exits"]:  # exit-<id>-x|t → имя ноды и протокол
+                parts = e["tag"].split("-")
+                sid = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else 0
+                e["server_id"], e["name"] = sid, names.get(sid, e["tag"])
+                e["proto"] = {"x": "XHTTP", "t": "TCP"}.get(parts[-1], parts[-1])
         servers.append({"id": s["id"], "name": s["name"], "url": s["url"], "enabled": s["enabled"],
+                        "role": s["role"] or "exit", "cascade": s["cascade"],
                         "online": bool(s["online"]) and s["last_seen"] > time.time() - 3 * SYNC_INTERVAL,
-                        "last_seen": s["last_seen"], "status": json.loads(s["status"] or "null"),
+                        "last_seen": s["last_seen"], "status": st,
                         "info": json.loads(s["info"] or "null")})
     states = [key_state(k) for k in keys]
     return {"servers": servers, "keys_total": len(keys), "keys_active": states.count("active"),
@@ -450,13 +546,30 @@ def api_key_links(kid: int, u=Depends(tg_user)):
 @app.post(P + "/api/servers")
 async def api_server_add(body: dict, u=Depends(owner)):
     srv = {"name": str(body.get("name", "")).strip()[:32] or "node",
-           "url": str(body.get("url", "")).strip(), "secret": str(body.get("secret", "")).strip()}
+           "url": str(body.get("url", "")).strip(), "secret": str(body.get("secret", "")).strip(), "cert": None}
+    if srv["url"] and not srv["url"].startswith("http"):  # во второе поле вставили код подключения моста
+        body["code"], srv["url"] = srv["url"], ""
+    if body.get("code"):
+        try:
+            c = parse_code(str(body["code"]))
+        except Exception:
+            raise HTTPException(400, "код подключения не распознан — скопируйте его целиком")
+        srv["url"], srv["secret"] = c["url"], c["secret"]
+        if c["fp"]:
+            try:
+                srv["cert"] = await asyncio.to_thread(fetch_pinned_cert, c["url"], c["fp"])
+            except Exception as e:
+                raise HTTPException(400, f"не удалось проверить сертификат агента: {e}")
+    if not srv["url"] or not srv["secret"]:
+        raise HTTPException(400, "нужен код подключения или URL и секрет агента")
     try:
         info = await agent(srv, "GET", "/info")
     except Exception as e:
         raise HTTPException(400, f"агент не отвечает: {e}")
-    qx("INSERT INTO servers(name,url,secret,info) VALUES(?,?,?,?)",
-       (srv["name"], srv["url"], srv["secret"], json.dumps(info)))
+    srv_role = info.get("role", "exit")
+    qx("INSERT INTO servers(name,url,secret,info,role,cert,bridge_uuid) VALUES(?,?,?,?,?,?,?)",
+       (srv["name"], srv["url"], srv["secret"], json.dumps(info), srv_role, srv["cert"],
+        str(uuidlib.uuid4()) if srv_role == "bridge" else None))
     asyncio.create_task(sync_now())
     return {"ok": True}
 
@@ -470,14 +583,18 @@ async def api_server_edit(sid: int, body: dict, u=Depends(owner)):
         qx("UPDATE servers SET name=? WHERE id=?", (str(body["name"]).strip()[:32] or s["name"], sid))
     if "enabled" in body:
         qx("UPDATE servers SET enabled=? WHERE id=?", (int(bool(body["enabled"])), sid))
+    if "cascade" in body:
+        qx("UPDATE servers SET cascade=? WHERE id=?", (int(bool(body["cascade"])), sid))
     if body.get("refresh_info"):
         qx("UPDATE servers SET info=? WHERE id=?", (json.dumps(await agent(s, "GET", "/info")), sid))
+    asyncio.create_task(sync_now())
     return {"ok": True}
 
 
 @app.delete(P + "/api/servers/{sid}")
-def api_server_del(sid: int, u=Depends(owner)):
+async def api_server_del(sid: int, u=Depends(owner)):
     qx("DELETE FROM servers WHERE id=?", (sid,))
+    asyncio.create_task(sync_now())
     return {"ok": True}
 
 

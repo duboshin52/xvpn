@@ -2,181 +2,387 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <title>xvpn</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@600;700&family=Nunito:wght@500;700;800&display=swap&subset=cyrillic" rel="stylesheet">
 <style>
-:root{--bg:var(--tg-theme-bg-color,#fff);--bg2:var(--tg-theme-secondary-bg-color,#f2f2f7);--tx:var(--tg-theme-text-color,#000);
---hint:var(--tg-theme-hint-color,#8e8e93);--acc:var(--tg-theme-button-color,#2481cc);--acc-tx:var(--tg-theme-button-text-color,#fff);
---red:#e5484d;--green:#30a46c;--orange:#f76b15}
-*{box-sizing:border-box}body{margin:0;font:15px/1.4 -apple-system,system-ui,Roboto,sans-serif;background:var(--bg2);color:var(--tx)}
-nav{display:flex;position:sticky;top:0;background:var(--bg);border-bottom:1px solid #0001;z-index:5}
-nav button{flex:1;padding:12px 4px;border:0;background:none;color:var(--hint);font-size:14px}
-nav button.on{color:var(--acc);box-shadow:inset 0 -2px var(--acc)}
-main{padding:12px}.card{background:var(--bg);border-radius:12px;padding:12px;margin-bottom:10px}
-.row{display:flex;align-items:center;gap:8px}.sp{flex:1}.hint{color:var(--hint);font-size:13px}
-.big{font-size:22px;font-weight:600}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.bar{height:6px;background:var(--bg2);border-radius:3px;overflow:hidden;margin-top:4px}.bar i{display:block;height:100%;background:var(--acc)}
-button.b{border:0;border-radius:10px;padding:10px 14px;background:var(--acc);color:var(--acc-tx);font-size:14px}
-button.s{background:var(--bg2);color:var(--tx)}button.r{background:var(--red);color:#fff}
-input{width:100%;padding:10px;border-radius:10px;border:1px solid #0002;background:var(--bg2);color:var(--tx);font-size:15px;margin:4px 0 8px}
-.dot{width:9px;height:9px;border-radius:50%;display:inline-block}.st-active{background:var(--green)}.st-disabled{background:var(--hint)}
-.st-expired,.st-limit{background:var(--red)}.pill{font-size:12px;padding:2px 8px;border-radius:10px;background:var(--bg2)}
-.list>.card{cursor:pointer}.wrap{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-#modal{position:fixed;inset:0;background:#0006;display:none;align-items:flex-end;z-index:10}
-#modal>div{background:var(--bg);width:100%;max-height:90vh;overflow:auto;border-radius:16px 16px 0 0;padding:16px}
-code{word-break:break-all;font-size:12px;background:var(--bg2);padding:6px;border-radius:6px;display:block;margin:4px 0}
-#qr{display:flex;justify-content:center;margin:8px 0}#qr img{background:#fff;padding:8px;border-radius:8px}
+/* «Кошачья почта»: лавандовая бумага, сакура, коты-сервера, нитки-туннели */
+:root{
+  --paper:#F4EEFF; --card:#FFFFFF; --ink:#2E2347; --mute:#8C80A8; --line:#E6DCF7;
+  --sakura:#FF6FA8; --sakura-soft:#FFE3EF; --mint:#22B892; --honey:#F5A524; --coral:#F2557A;
+  --ginger:#FFB36B; --shadow:0 6px 20px -12px #6B4FA580;
+  --r-big:24px; --r:16px; --r-s:12px;
+  --display:'Comfortaa',ui-rounded,system-ui,sans-serif; --body:'Nunito',ui-rounded,system-ui,sans-serif;
+}
+body.dark{
+  --paper:#1B1530; --card:#261D3F; --ink:#F2EBFF; --mute:#A496C4; --line:#3A2E5A;
+  --sakura-soft:#4A2741; --shadow:0 8px 24px -14px #000;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--paper);color:var(--ink);font:500 15px/1.45 var(--body)}
+body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
+button,input{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--sakura);outline-offset:2px}
+h1,h2,h3{font-family:var(--display);font-weight:700;margin:0;letter-spacing:-.01em}
+h2{font-size:19px;margin:22px 4px 10px}
+main{padding:16px 14px 8px;max-width:640px;margin:0 auto}
+.mute{color:var(--mute)} .small{font-size:13px}
+.row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}
+.card{background:var(--card);border-radius:var(--r);padding:14px;margin-bottom:10px;box-shadow:var(--shadow)}
+
+/* шапка */
+.hello{display:flex;align-items:center;gap:12px;padding:4px 4px 2px}
+.hello h1{font-size:23px;line-height:1.15}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0 4px}
+.stat{background:var(--card);border-radius:var(--r-s);padding:10px 12px;box-shadow:var(--shadow)}
+.stat b{display:block;font:700 20px/1.2 var(--display)}
+.stat span{font-size:12px;color:var(--mute)}
+
+/* каскад: главный элемент */
+.yarn{background:var(--card);border-radius:var(--r-big);padding:14px 10px 10px;margin-bottom:12px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+.yarn::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 50% 0,var(--sakura-soft),transparent 62%);opacity:.9}
+.yarn>*{position:relative}
+.yarn h3{font-size:16px;padding:0 6px}
+.yarn svg{display:block;width:100%;height:auto;margin-top:2px}
+.thread{fill:none;stroke-width:3;stroke-linecap:round}
+.thread.on{stroke:var(--sakura);stroke-dasharray:2 9;animation:flow 1.1s linear infinite}
+.thread.off{stroke:var(--line);stroke-dasharray:1 7}
+@keyframes flow{to{stroke-dashoffset:-11}}
+.zz{font:700 11px var(--display);fill:var(--mute);animation:zz 2.4s ease-in-out infinite}
+@keyframes zz{50%{opacity:.25;transform:translateY(-3px)}}
+.legend{display:flex;flex-wrap:wrap;gap:6px;padding:4px 6px 2px}
+.tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:700;padding:3px 9px;border-radius:999px;background:var(--paper);color:var(--mute)}
+.tag.ok{color:var(--mint)}.tag.bad{color:var(--coral)}.tag.warn{color:var(--honey)}.tag.pink{color:var(--sakura)}
+.tag i{width:7px;height:7px;border-radius:50%;background:currentColor}
+
+/* серверы */
+.srv{display:grid;grid-template-columns:52px 1fr;gap:12px;align-items:start}
+.meter{margin-top:8px}.meter div{display:flex;justify-content:space-between;font-size:12px;color:var(--mute)}
+.bar{height:6px;background:var(--paper);border-radius:3px;overflow:hidden;margin-top:3px}
+.bar i{display:block;height:100%;border-radius:3px;background:var(--sakura)}
+.bar i.hot{background:var(--coral)}
+
+/* ключи */
+.search{display:flex;gap:8px;margin-bottom:12px}
+.key{display:flex;align-items:center;gap:12px;background:var(--card);border-radius:var(--r-s);padding:12px 14px;margin-bottom:8px;box-shadow:var(--shadow);width:100%;border:0;text-align:left;cursor:pointer}
+.paw{width:22px;height:22px;flex:none}
+.key .bar{margin-top:6px}
+
+/* кнопки, поля */
+.btn{border:0;border-radius:var(--r-s);padding:11px 16px;background:var(--sakura);color:#fff;font-weight:800;cursor:pointer}
+.btn.soft{background:var(--paper);color:var(--ink);font-weight:700}
+.btn.danger{background:transparent;color:var(--coral);box-shadow:inset 0 0 0 1.5px var(--coral)}
+.btn.wide{width:100%}
+.btn{white-space:nowrap}
+.btn.card-bg{background:var(--card);box-shadow:var(--shadow)}
+.srv .btns{gap:6px}.srv .btn{padding:8px 12px;font-size:13px}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+input{width:100%;padding:11px 13px;border-radius:var(--r-s);border:1.5px solid var(--line);background:var(--paper);margin:4px 0 10px;outline:0}
+input:focus{border-color:var(--sakura)}
+label{font-size:13px;color:var(--mute);font-weight:700}
+.switch{display:flex;align-items:center;gap:10px;margin-top:10px;cursor:pointer;font-weight:700;font-size:14px}
+.switch input{display:none}
+.switch s{width:38px;height:22px;border-radius:11px;background:var(--line);position:relative;flex:none;transition:background .2s}
+.switch s::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .2s}
+.switch input:checked+s{background:var(--mint)}.switch input:checked+s::after{transform:translateX(16px)}
+
+/* пустые состояния */
+.empty{text-align:center;padding:26px 16px}
+.empty p{margin:8px 0 14px}
+
+/* нижняя навигация */
+nav{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:center;gap:4px;padding:8px 10px calc(8px + env(safe-area-inset-bottom));background:var(--card);box-shadow:0 -8px 24px -18px #6B4FA5;z-index:5}
+nav button{flex:1;max-width:120px;border:0;background:none;padding:6px 2px 4px;border-radius:14px;color:var(--mute);font-size:12px;font-weight:800;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer}
+nav svg{width:24px;height:24px}
+nav button.on{color:var(--sakura);background:var(--sakura-soft)}
+
+/* нижний лист с ушками */
+#sheet{position:fixed;inset:0;background:#1B153080;display:none;align-items:flex-end;z-index:10}
+#sheet.open{display:flex}
+#sheet .panel{position:relative;width:100%;max-width:640px;margin:0 auto;animation:up .22s ease-out}
+#s{background:var(--card);max-height:86vh;overflow:auto;border-radius:26px 26px 0 0;padding:22px 16px calc(18px + env(safe-area-inset-bottom))}
+#ears{position:absolute;top:-17px;left:50%;transform:translateX(-50%);width:120px;height:20px;pointer-events:none}
+@keyframes up{from{transform:translateY(40px);opacity:.4}}
+code{display:block;word-break:break-all;font:12px/1.4 ui-monospace,monospace;background:var(--paper);padding:9px 10px;border-radius:10px;margin:6px 0;cursor:pointer}
+#qr{display:flex;justify-content:center;margin:14px 0}#qr img,#qr canvas{background:#fff;padding:10px;border-radius:16px}
+details summary{cursor:pointer;font-weight:700;color:var(--mute);margin-top:12px}
+@media (prefers-reduced-motion:reduce){.thread.on,.zz,#sheet .panel{animation:none}}
 </style>
 </head>
 <body>
-<nav><button data-t="status" class="on">Статус</button><button data-t="keys">Ключи</button>
-<button data-t="servers">Серверы</button><button data-t="admins">Админы</button></nav>
-<main id="v"><div class="hint">Загрузка…</div></main>
-<div id="modal" onclick="if(event.target===this)closeM()"><div id="m"></div></div>
+<main id="v"><div class="empty" id="boot"></div></main>
+<nav id="nav"></nav>
+<div id="sheet" onclick="if(event.target===this)closeS()"><div class="panel"><svg id="ears" viewBox="0 0 120 20" aria-hidden="true"><path d="M8 20 L22 2 L38 20Z M82 20 L98 2 L112 20Z" style="fill:var(--card)"/></svg><div id="s"></div></div></div>
 <script>
 const tg = window.Telegram.WebApp; tg.ready(); tg.expand();
+const dark = tg.colorScheme === 'dark'; if (dark) document.body.classList.add('dark');
+try { tg.setHeaderColor(dark ? '#1B1530' : '#F4EEFF'); tg.setBackgroundColor(dark ? '#1B1530' : '#F4EEFF'); } catch (e) {}
 const BASE = location.pathname.replace(/\/$/, '');
 let ME = null, TAB = 'status', KEYS = [];
 const $ = s => document.querySelector(s);
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function fb(n){n=+n||0;const u=['Б','КБ','МБ','ГБ','ТБ'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return (i?n.toFixed(1):n)+' '+u[i]}
 const pct=(a,b)=>b?Math.min(100,Math.round(a*100/b)):0;
-const dt=t=>t?new Date(t*1000).toLocaleDateString('ru-RU'):'∞';
-function up(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600);return d?`${d}д ${h}ч`:`${h}ч ${Math.floor(s%3600/60)}м`}
+const dt=t=>t?new Date(t*1000).toLocaleDateString('ru-RU',{day:'numeric',month:'short'}):'бессрочно';
+const till=t=>t?'до '+dt(t):'бессрочно';
+function upt(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600);return d?`${d} д ${h} ч`:`${h} ч ${Math.floor(s%3600/60)} мин`}
 async function api(path, method='GET', body){
   const r = await fetch(BASE+'/api'+path,{method,headers:{'X-Init-Data':tg.initData,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
   if(!r.ok){const t=await r.text();let m=t;try{m=JSON.parse(t).detail}catch(e){}throw new Error(m||r.status)}
   return r.json();
 }
+const haptic = t => { try { tg.HapticFeedback.notificationOccurred(t) } catch (e) {} };
 function toast(m){tg.showAlert?tg.showAlert(String(m)):alert(m)}
 function ask(m){return new Promise(r=>tg.showConfirm?tg.showConfirm(m,r):r(confirm(m)))}
-function openM(h){$('#m').innerHTML=h;$('#modal').style.display='flex'}
-function closeM(){$('#modal').style.display='none'}
-function copy(t){navigator.clipboard.writeText(t).then(()=>tg.HapticFeedback?.notificationOccurred('success'),()=>toast(t))}
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');TAB=b.dataset.t;render()});
+function openS(h){$('#s').innerHTML=h;$('#sheet').classList.add('open')}
+function closeS(){$('#sheet').classList.remove('open')}
+function copy(t){navigator.clipboard.writeText(t).then(()=>{haptic('success')},()=>toast(t))}
+
+/* ---------- коты (оригинальная рисовка) ---------- */
+const COATS = ['#FFF6E9','#D9D3E6','#FFD9B8','#E8D9FF','#CFEFE4','#F3E1C9'];
+function cat(mood='happy', coat='#FFF6E9', size=52, extra=''){
+  const ink = '#2E2347';
+  const eyes = {
+    happy:  `<path d="M19 31 Q22.5 26.5 26 31 M38 31 Q41.5 26.5 45 31" stroke="${ink}" stroke-width="2.6" fill="none" stroke-linecap="round"/>`,
+    awake:  `<circle cx="22.5" cy="30.5" r="3.2" fill="${ink}"/><circle cx="41.5" cy="30.5" r="3.2" fill="${ink}"/><circle cx="23.6" cy="29.3" r="1" fill="#fff"/><circle cx="42.6" cy="29.3" r="1" fill="#fff"/>`,
+    sleepy: `<path d="M18.5 31 Q22.5 34.5 26.5 31 M37.5 31 Q41.5 34.5 45.5 31" stroke="${ink}" stroke-width="2.6" fill="none" stroke-linecap="round"/>`,
+    worried:`<circle cx="22.5" cy="31" r="2.8" fill="${ink}"/><circle cx="41.5" cy="31" r="2.8" fill="${ink}"/><path d="M18.5 26.5 L25.5 24 M45.5 26.5 L38.5 24" stroke="${ink}" stroke-width="2.2" stroke-linecap="round"/>`,
+  }[mood];
+  return `<svg viewBox="0 0 64 58" width="${size}" height="${size*58/64}" aria-hidden="true" ${extra}>
+    <path d="M10 23 L8.5 5 L24 14.5 Q32 11.5 40 14.5 L55.5 5 L54 23 Q60.5 35 52.5 45 Q44.5 55 32 55 Q19.5 55 11.5 45 Q3.5 35 10 23Z" style="fill:${coat}" stroke="${ink}" stroke-width="2.6" stroke-linejoin="round"/>
+    <path d="M12.5 10 L13.2 19.5 L20.5 15.2Z M51.5 10 L50.8 19.5 L43.5 15.2Z" fill="#FFB3CF"/>
+    ${eyes}
+    <path d="M30.5 36.2 L33.5 36.2 L32 37.8Z" fill="${ink}" stroke="${ink}" stroke-width="1.4" stroke-linejoin="round"/>
+    <path d="M27.5 39.5 Q29.7 42.2 32 39.6 Q34.3 42.2 36.5 39.5" stroke="${ink}" stroke-width="2.1" fill="none" stroke-linecap="round"/>
+    <ellipse cx="16.5" cy="38" rx="3.4" ry="2.1" fill="#FF8FB8" opacity=".55"/><ellipse cx="47.5" cy="38" rx="3.4" ry="2.1" fill="#FF8FB8" opacity=".55"/>
+    <path d="M4 34 L12 35.5 M4.5 39.5 L12 38.5 M60 34 L52 35.5 M59.5 39.5 L52 38.5" stroke="${ink}" stroke-width="1.5" stroke-linecap="round" opacity=".7"/>
+  </svg>`;
+}
+const pawSvg = c => `<svg class="paw" viewBox="0 0 24 24" aria-hidden="true"><g style="fill:${c}"><ellipse cx="12" cy="15.5" rx="5.2" ry="4.4"/><circle cx="5.6" cy="10.2" r="2.2"/><circle cx="9.4" cy="6.2" r="2.3"/><circle cx="14.6" cy="6.2" r="2.3"/><circle cx="18.4" cy="10.2" r="2.2"/></g></svg>`;
+const STATE_COLOR = {active:'var(--mint)',disabled:'var(--mute)',expired:'var(--coral)',limit:'var(--honey)'};
+const ST = {active:'активен',disabled:'выключен',expired:'срок истёк',limit:'трафик кончился'};
+function srvMood(s){ if(!s.online||!s.status) return 'sleepy'; return s.status.xray.active?'happy':'worried'; }
+
+/* ---------- навигация ---------- */
+const TABS = [
+  ['status','Котики','<path d="M5 11 L4 3 L9.5 7 Q12 6 14.5 7 L20 3 L19 11 Q21 16 17 19 Q15 21 12 21 Q9 21 7 19 Q3 16 5 11Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'],
+  ['keys','Ключи','<circle cx="8" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12.5 12 H21 M18 12 V15.5 M21 12 V14.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'],
+  ['servers','Серверы','<rect x="3.5" y="4" width="17" height="6.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="7.5" cy="7.2" r="1.2" fill="currentColor"/><circle cx="7.5" cy="16.7" r="1.2" fill="currentColor"/>'],
+  ['admins','Админы','<circle cx="12" cy="8.5" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4.5 20.5 Q5.5 14.5 12 14.5 Q18.5 14.5 19.5 20.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'],
+];
+$('#nav').innerHTML = TABS.map(([t,l,ic])=>`<button data-t="${t}" class="${t===TAB?'on':''}"><svg viewBox="0 0 24 24">${ic}</svg>${l}</button>`).join('');
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
+  TAB=b.dataset.t; window.scrollTo(0,0); render();
+});
 
 async function render(){
   try{ await ({status:rStatus,keys:rKeys,servers:rServers,admins:rAdmins})[TAB]() }
-  catch(e){ $('#v').innerHTML=`<div class="card">Ошибка: ${esc(e.message)}</div>` }
+  catch(e){ $('#v').innerHTML=`<div class="card empty">${cat('worried','#D9D3E6',72)}<p>Панель не отвечает: ${esc(e.message)}</p><button class="btn" onclick="render()">Повторить</button></div>` }
 }
 
+/* ---------- схема каскада ---------- */
+function groupExits(bridge, servers){
+  const by = new Map();
+  for (const e of (bridge.status?.exits || [])) {
+    const g = by.get(e.server_id) || {id:e.server_id, name:e.name, paths:[]};
+    g.paths.push(e); by.set(e.server_id, g);
+  }
+  return [...by.values()].map(g=>{
+    const alive = g.paths.filter(p=>p.alive);
+    return {...g, alive: alive.length>0, best: alive.length?Math.min(...alive.map(p=>p.delay||9999)):null};
+  });
+}
+function yarnSvg(bridge, exits){
+  const W=340, top=56, rowY=214, n=Math.max(exits.length,1), from=top+64;
+  const bridgeUp = bridge.online && bridge.status?.xray?.active;
+  let s = `<svg viewBox="0 0 ${W} 280" role="img" aria-label="Схема каскада">`;
+  // нитки
+  exits.forEach((e,i)=>{
+    const x = W*(i+.5)/n, on = bridgeUp && e.alive;
+    s += `<path class="thread ${on?'on':'off'}" d="M${W/2} ${from} C ${W/2} ${from+50}, ${x} ${rowY-86}, ${x} ${rowY-36}"/>`;
+    const mx = (W/2 + x)/2 + (x===W/2?0:(x<W/2?-8:8)), my = (from+rowY-36)/2 + 6;
+    s += `<g transform="translate(${mx} ${my})"><rect x="-27" y="-11" width="54" height="22" rx="11" style="fill:var(--card);stroke:${on?'var(--sakura)':'var(--line)'}" stroke-width="1.5"/>
+      <text text-anchor="middle" y="4.5" font-size="11.5" font-weight="800" style="font-family:var(--body);fill:${on?'var(--sakura)':'var(--mute)'}">${on?(e.best+' мс'):'нет'}</text></g>`;
+  });
+  // мост
+  s += `<g transform="translate(${W/2-34} ${top-38})">${cat(bridgeUp?'happy':(bridge.online?'worried':'sleepy'),'var(--ginger)',68)}</g>
+    <text x="${W/2}" y="${top+50}" text-anchor="middle" font-size="12.5" font-weight="800" style="font-family:var(--body);fill:var(--ink)">${esc(bridge.name)}</text>`;
+  // выходы
+  exits.forEach((e,i)=>{
+    const x = W*(i+.5)/n;
+    s += `<g transform="translate(${x-26} ${rowY-30})">${cat(e.alive?'happy':'sleepy',COATS[i%COATS.length],52)}</g>`;
+    if(!e.alive) s += `<text class="zz" x="${x+20}" y="${rowY-30}">z z</text>`;
+    s += `<text x="${x}" y="${rowY+38}" text-anchor="middle" font-size="12.5" font-weight="800" style="font-family:var(--body);fill:var(--ink)">${esc(e.name)}</text>
+      <text x="${x}" y="${rowY+54}" text-anchor="middle" font-size="11" style="font-family:var(--body);fill:var(--mute)">${e.paths.filter(p=>p.alive).length}/${e.paths.length} пути</text>`;
+  });
+  if(!exits.length) s += `<text x="${W/2}" y="${rowY}" text-anchor="middle" font-size="13" style="font-family:var(--body);fill:var(--mute)">Выходов пока нет</text>`;
+  return s + '</svg>';
+}
+function yarnCard(b, servers){
+  const exits = groupExits(b, servers);
+  const alive = exits.filter(e=>e.alive);
+  const best = alive.sort((a,c)=>a.best-c.best)[0];
+  let note;
+  if(!b.online) note = `<span class="tag bad"><i></i>мост не на связи</span>`;
+  else if(!exits.length) note = `<span class="tag warn"><i></i>включите выходы во вкладке «Серверы»</span>`;
+  else if(!alive.length) note = `<span class="tag bad"><i></i>все выходы спят — трафик за рубеж не идёт</span>`;
+  else note = `<span class="tag ok"><i></i>сейчас через ${esc(best.name)}</span>${alive.length<exits.length?`<span class="tag warn"><i></i>в резерве ${exits.length-alive.length} спит</span>`:`<span class="tag pink"><i></i>резерв: ${alive.length-1}</span>`}`;
+  return `<section class="yarn"><h3>Каскад</h3>${yarnSvg(b, exits)}
+    <div class="legend">${note}<span class="tag"><i></i>российские сайты — напрямую</span></div></section>`;
+}
+
+/* ---------- вкладка «Котики» ---------- */
+function greet(){const h=new Date().getHours();return h<6?'Доброй ночи':h<12?'Доброе утро':h<18?'Привет':'Добрый вечер'}
 async function rStatus(){
   const o = await api('/overview');
-  let h = `<div class="grid">
-   <div class="card"><div class="hint">Ключи активны</div><div class="big">${o.keys_active}/${o.keys_total}</div></div>
-   <div class="card"><div class="hint">Онлайн (3 мин)</div><div class="big">${o.keys_online}</div></div></div>
-   <div class="card"><div class="hint">Трафик всего</div><div class="big">${fb(o.traffic_total)}</div></div>`;
+  const bridges = o.servers.filter(s=>s.role==='bridge');
+  const allUp = o.servers.length && o.servers.every(s=>s.online&&s.status?.xray?.active);
+  let h = `<header class="hello">${cat(allUp?'happy':(o.servers.length?'worried':'awake'),'#FFF6E9',58)}
+    <div><h1>${greet()}, ${esc(ME.first_name||'хозяин')}</h1>
+    <div class="mute small">${!o.servers.length?'Серверов пока нет':allUp?'Все коты на месте':'Кто-то из котов спит — загляните ниже'}</div></div></header>
+    <div class="stats"><div class="stat"><b>${o.keys_active}<span class="mute" style="font-size:14px">/${o.keys_total}</span></b><span>активных ключей</span></div>
+    <div class="stat"><b>${o.keys_online}</b><span>онлайн сейчас</span></div>
+    <div class="stat"><b>${fb(o.traffic_total).replace(' ','&nbsp;')}</b><span>трафик всего</span></div></div>`;
+  h += bridges.map(b=>yarnCard(b,o.servers)).join('');
+  if(!bridges.length && o.servers.length && ME.is_owner) h += `<div class="card row">${cat('awake','#FFB36B',44)}<div class="grow small"><b>Каскада нет.</b> Поставьте мост на российский VPS — он работает даже при белых списках. Команда во вкладке «Серверы».</div></div>`;
+  if(o.servers.length) h += `<h2>Серверы</h2>`;
   for(const s of o.servers){
-    const st=s.status;
-    h+=`<div class="card"><div class="row"><span class="dot ${s.online?'st-active':'st-expired'}"></span><b>${esc(s.name)}</b>
-     <span class="sp"></span><span class="pill">${s.info?esc(s.info.domain):''}</span></div>`;
-    if(st&&s.online){
-      h+=`<div class="hint" style="margin-top:6px">Xray: ${st.xray.active?'работает':'<b style="color:var(--red)">остановлен</b>'} · ${esc(st.xray.version)} · ключей ${st.xray.users}</div>
-      <div style="margin-top:6px">CPU ${st.cpu.toFixed(0)}% (${st.cores} ядер, LA ${st.load[0].toFixed(2)})<div class="bar"><i style="width:${st.cpu}%"></i></div></div>
-      <div style="margin-top:6px">RAM ${fb(st.ram.used)} / ${fb(st.ram.total)}<div class="bar"><i style="width:${pct(st.ram.used,st.ram.total)}%"></i></div></div>
-      <div style="margin-top:6px">Диск ${fb(st.disk.used)} / ${fb(st.disk.total)}<div class="bar"><i style="width:${pct(st.disk.used,st.disk.total)}%"></i></div></div>
-      <div class="hint" style="margin-top:6px">Сеть ↑${fb(st.net.sent)} ↓${fb(st.net.recv)} · аптайм ${up(st.uptime)}</div>`;
-    } else h+=`<div class="hint">Нет связи с агентом${s.last_seen?' с '+new Date(s.last_seen*1000).toLocaleString('ru-RU'):''}</div>`;
-    h+=`<div class="wrap"><button class="b s" onclick="restart(${s.id})">Перезапустить Xray</button></div></div>`;
+    const st=s.status, up=s.online&&st;
+    h += `<article class="card srv">${cat(srvMood(s), s.role==='bridge'?'var(--ginger)':COATS[(s.id-1)%COATS.length],52)}
+      <div><div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${s.role==='bridge'?'pink':''}">${s.role==='bridge'?'мост':'выход'}</span></div>`;
+    if(up){
+      h += `<div class="mute small">${st.xray.active?`Xray работает, ключей ${st.xray.users}`:'<b style="color:var(--coral)">Xray остановлен</b>'} · аптайм ${upt(st.uptime)}</div>
+        ${meter('Процессор', `${st.cpu.toFixed(0)}%`, st.cpu)}
+        ${meter('Память', `${fb(st.ram.used)} из ${fb(st.ram.total)}`, pct(st.ram.used,st.ram.total))}
+        ${meter('Диск', `${fb(st.disk.used)} из ${fb(st.disk.total)}`, pct(st.disk.used,st.disk.total))}
+        <div class="btns"><button class="btn soft" onclick="restart(${s.id})">Перезапустить Xray</button></div>`;
+    } else h += `<div class="mute small">Спит: нет связи с агентом${s.last_seen?' с '+new Date(s.last_seen*1000).toLocaleString('ru-RU'):''}</div>`;
+    h += `</div></article>`;
   }
-  if(!o.servers.length) h+=`<div class="card hint">Серверов нет — добавьте во вкладке «Серверы».</div>`;
-  h+=`<button class="b s" style="width:100%" onclick="syncNow()">Синхронизировать сейчас</button>`;
-  $('#v').innerHTML=h;
+  if(!o.servers.length) h += `<div class="card empty">${cat('sleepy','#D9D3E6',72)}<p>Добавьте первый сервер — и тут появится его кот.</p><button class="btn" onclick="go('servers')">Добавить сервер</button></div>`;
+  else h += `<button class="btn soft card-bg wide" style="margin-top:4px" onclick="syncNow(this)">Синхронизировать сейчас</button>`;
+  $('#v').innerHTML = h;
 }
-async function restart(id){if(await ask('Перезапустить Xray? Соединения кратко прервутся.')){try{await api(`/servers/${id}/restart`,'POST');toast('Готово')}catch(e){toast(e.message)}}}
-async function syncNow(){try{await api('/sync','POST');render()}catch(e){toast(e.message)}}
+const meter=(l,v,p)=>`<div class="meter"><div><span>${l}</span><span>${v}</span></div><div class="bar"><i class="${p>85?'hot':''}" style="width:${p}%"></i></div></div>`;
+function go(t){document.querySelector(`nav button[data-t="${t}"]`).click()}
+async function restart(id){if(await ask('Перезапустить Xray? Соединения на пару секунд прервутся.')){try{await api(`/servers/${id}/restart`,'POST');haptic('success');toast('Xray перезапущен')}catch(e){toast(e.message)}}}
+async function syncNow(b){b.disabled=true;b.textContent='Синхронизирую…';try{await api('/sync','POST');haptic('success');render()}catch(e){toast(e.message);b.disabled=false}}
 
-const ST={active:'активен',disabled:'выключен',expired:'истёк',limit:'лимит'};
+/* ---------- ключи ---------- */
 async function rKeys(){
   KEYS = await api('/keys');
-  let h=`<div class="row" style="margin-bottom:10px"><input id="f" placeholder="Поиск" oninput="rKeyList()" style="margin:0"><button class="b" onclick="newKey()">+ Ключ</button></div><div class="list" id="kl"></div>`;
-  $('#v').innerHTML=h; rKeyList();
+  $('#v').innerHTML = `<div class="search"><input id="f" placeholder="Найти ключ" oninput="rKeyList()" style="margin:0"><button class="btn" onclick="newKey()">Новый ключ</button></div><div id="kl"></div>`;
+  rKeyList();
 }
 function rKeyList(){
   const f=($('#f')?.value||'').toLowerCase();
-  $('#kl').innerHTML = KEYS.filter(k=>k.name.toLowerCase().includes(f)).map(k=>`
-   <div class="card" onclick="keyM(${k.id})"><div class="row"><span class="dot st-${k.state}"></span><b>${esc(k.name)}</b>
-   ${k.online?'<span class="pill" style="color:var(--green)">онлайн</span>':''}<span class="sp"></span><span class="hint">${ST[k.state]}</span></div>
-   <div class="hint" style="margin-top:4px">${fb(k.used_bytes)} / ${k.limit_bytes?fb(k.limit_bytes):'∞'} · до ${dt(k.expire_at)}</div>
-   ${k.limit_bytes?`<div class="bar"><i style="width:${pct(k.used_bytes,k.limit_bytes)}%"></i></div>`:''}</div>`).join('') || '<div class="card hint">Ключей нет</div>';
+  const list = KEYS.filter(k=>k.name.toLowerCase().includes(f));
+  $('#kl').innerHTML = list.map(k=>`
+   <button class="key" onclick="keyS(${k.id})">${pawSvg(STATE_COLOR[k.state])}
+    <div class="grow"><div class="row"><b class="grow">${esc(k.name)}</b>${k.online?'<span class="tag ok"><i></i>онлайн</span>':`<span class="mute small">${ST[k.state]}</span>`}</div>
+    <div class="mute small">${fb(k.used_bytes)} из ${k.limit_bytes?fb(k.limit_bytes):'∞'}, ${till(k.expire_at)}</div>
+    ${k.limit_bytes?`<div class="bar"><i class="${pct(k.used_bytes,k.limit_bytes)>85?'hot':''}" style="width:${pct(k.used_bytes,k.limit_bytes)}%"></i></div>`:''}</div></button>`).join('')
+   || (KEYS.length?`<div class="card empty mute">Ничего не нашлось</div>`
+       :`<div class="card empty">${cat('awake','#FFD9B8',72)}<p>Ключей пока нет. Создайте первый — получите ссылку и QR-код.</p><button class="btn" onclick="newKey()">Новый ключ</button></div>`);
 }
 function newKey(){
-  openM(`<b>Новый ключ</b><div class="hint" style="margin-top:8px">Имя</div><input id="kn" placeholder="например, mama-phone">
-  <div class="grid"><div><div class="hint">Дней (0 = бессрочно)</div><input id="kd" type="number" value="30"></div>
-  <div><div class="hint">ГБ (0 = безлимит)</div><input id="kg" type="number" value="0"></div></div>
-  <button class="b" style="width:100%" onclick="doNewKey()">Создать</button>`);
-  setTimeout(()=>$('#kn').focus(),100);
+  openS(`<h3>Новый ключ</h3>
+  <div style="margin-top:12px"><label for="kn">Имя</label><input id="kn" placeholder="например, мамин телефон"></div>
+  <div class="row"><div class="grow"><label for="kd">Дней (0 — бессрочно)</label><input id="kd" type="number" value="30"></div>
+  <div class="grow"><label for="kg">ГБ (0 — безлимит)</label><input id="kg" type="number" value="0"></div></div>
+  <button class="btn wide" onclick="doNewKey(this)">Создать ключ</button>`);
+  setTimeout(()=>$('#kn').focus(),120);
 }
-async function doNewKey(){
-  try{const k=await api('/keys','POST',{name:$('#kn').value,days:+$('#kd').value,gb:+$('#kg').value});closeM();await rKeys();keyM(k.id)}catch(e){toast(e.message)}
+async function doNewKey(b){
+  b.disabled=true;
+  try{const k=await api('/keys','POST',{name:$('#kn').value,days:+$('#kd').value,gb:+$('#kg').value});haptic('success');await rKeys();keyS(k.id)}
+  catch(e){toast(e.message);b.disabled=false}
 }
-async function keyM(id){
+async function keyS(id){
   const k=KEYS.find(x=>x.id===id); const L=await api(`/keys/${id}/links`);
-  openM(`<div class="row"><span class="dot st-${k.state}"></span><b>${esc(k.name)}</b><span class="sp"></span><span class="hint">${ST[k.state]}</span></div>
-  <div class="hint">Трафик ${fb(k.used_bytes)} / ${k.limit_bytes?fb(k.limit_bytes):'∞'} · до ${dt(k.expire_at)}${k.last_active?' · был активен '+new Date(k.last_active*1000).toLocaleString('ru-RU'):''}</div>
+  const cascade = L.links.filter(l=>decodeURIComponent(l.split('#')[1]||'').includes('Каскад')).length;
+  openS(`<div class="row">${pawSvg(STATE_COLOR[k.state])}<h3 class="grow">${esc(k.name)}</h3><span class="tag">${ST[k.state]}</span></div>
+  <div class="mute small" style="margin-top:6px">${fb(k.used_bytes)} из ${k.limit_bytes?fb(k.limit_bytes):'∞'}, ${till(k.expire_at)}${k.last_active?`<br>Был в сети ${new Date(k.last_active*1000).toLocaleString('ru-RU')}`:''}</div>
   <div id="qr"></div>
-  <div class="hint">Ссылка-подписка (Happ, Hiddify, v2rayN, v2RayTun)</div><code onclick="copy(this.textContent)">${esc(L.sub_url)}</code>
-  <div class="wrap"><button class="b" onclick="copy('${esc(L.sub_url)}')">Копировать подписку</button></div>
-  <details style="margin-top:10px"><summary class="hint">Отдельные ключи (${L.links.length})</summary>
-  ${L.links.map(l=>`<code onclick="copy(this.textContent)">${esc(l)}</code>`).join('')}</details>
-  <div class="hint" style="margin-top:12px">Управление</div>
-  <div class="wrap">
-   <button class="b s" onclick="kEdit(${id},{add_days:30})">+30 дней</button>
-   <button class="b s" onclick="kEdit(${id},{add_days:7})">+7 дней</button>
-   <button class="b s" onclick="kEdit(${id},{unlimited_time:1})">Бессрочно</button>
-   <button class="b s" onclick="kLimit(${id})">Лимит ГБ</button>
-   <button class="b s" onclick="kEdit(${id},{reset_traffic:1})">Сбросить трафик</button>
-   <button class="b s" onclick="kRename(${id})">Переименовать</button>
-   <button class="b s" onclick="kEdit(${id},{enabled:${k.enabled?0:1}})">${k.enabled?'Выключить':'Включить'}</button>
-   <button class="b s" onclick="kRegen(${id})">Перевыпустить</button>
-   <button class="b r" onclick="kDel(${id})">Удалить</button></div>`);
-  new QRCode($('#qr'),{text:L.sub_url,width:200,height:200});
+  <label>Подписка для Happ, Hiddify, v2RayTun, v2rayN</label><code onclick="copy(this.textContent)">${esc(L.sub_url)}</code>
+  ${cascade?`<div class="mute small">В подписке ${cascade===1?'есть':'есть'} каскад через Россию — он стоит первым и работает при белых списках.</div>`:''}
+  <div class="btns"><button class="btn" onclick="copy('${esc(L.sub_url)}')">Скопировать подписку</button></div>
+  <details><summary>Отдельные ссылки (${L.links.length})</summary>${L.links.map(l=>`<code onclick="copy(this.textContent)">${esc(l)}</code>`).join('')}</details>
+  <h3 style="margin-top:18px;font-size:15px">Управление</h3>
+  <div class="btns">
+   <button class="btn soft" onclick="kEdit(${id},{add_days:30})">+30 дней</button>
+   <button class="btn soft" onclick="kEdit(${id},{add_days:7})">+7 дней</button>
+   <button class="btn soft" onclick="kEdit(${id},{unlimited_time:1})">Бессрочно</button>
+   <button class="btn soft" onclick="kLimit(${id})">Лимит трафика</button>
+   <button class="btn soft" onclick="kEdit(${id},{reset_traffic:1})">Обнулить трафик</button>
+   <button class="btn soft" onclick="kRename(${id})">Переименовать</button>
+   <button class="btn soft" onclick="kEdit(${id},{enabled:${k.enabled?0:1}})">${k.enabled?'Выключить':'Включить'}</button>
+   <button class="btn soft" onclick="kRegen(${id})">Перевыпустить</button>
+   <button class="btn danger" onclick="kDel(${id})">Удалить</button></div>`);
+  new QRCode($('#qr'),{text:L.sub_url,width:200,height:200,colorDark:'#2E2347',colorLight:'#ffffff'});
 }
-async function kEdit(id,b){try{await api(`/keys/${id}`,'PATCH',b);await rKeys();keyM(id)}catch(e){toast(e.message)}}
-function inputM(title,val,type,cb){window._icb=cb;openM(`<b>${esc(title)}</b><input id="iv" type="${type}" value="${esc(val)}"><button class="b" style="width:100%" onclick="window._icb($('#iv').value)">OK</button>`);setTimeout(()=>$('#iv').focus(),100)}
-function kLimit(id){inputM('Лимит в ГБ (0 = безлимит)','0','number',v=>kEdit(id,{limit_gb:+v}))}
-function kRename(id){inputM('Новое имя','','text',v=>v&&kEdit(id,{name:v}))}
-async function kRegen(id){if(await ask('Старая ссылка перестанет работать. Перевыпустить?'))kEdit(id,{regen:1})}
-async function kDel(id){if(await ask('Удалить ключ?')){await api(`/keys/${id}`,'DELETE');closeM();rKeys()}}
+async function kEdit(id,b){try{await api(`/keys/${id}`,'PATCH',b);haptic('success');await rKeys();keyS(id)}catch(e){toast(e.message)}}
+function inputS(title,val,type,cb){window._icb=cb;openS(`<h3>${esc(title)}</h3><input id="iv" type="${type}" value="${esc(val)}" style="margin-top:12px"><button class="btn wide" onclick="window._icb($('#iv').value)">Сохранить</button>`);setTimeout(()=>$('#iv').focus(),120)}
+function kLimit(id){inputS('Лимит в ГБ (0 — безлимит)','0','number',v=>kEdit(id,{limit_gb:+v}))}
+function kRename(id){inputS('Новое имя ключа','','text',v=>v&&kEdit(id,{name:v}))}
+async function kRegen(id){if(await ask('Старая ссылка перестанет работать. Перевыпустить ключ?'))kEdit(id,{regen:1})}
+async function kDel(id){if(await ask('Удалить ключ насовсем?')){await api(`/keys/${id}`,'DELETE');closeS();rKeys()}}
 
+/* ---------- серверы ---------- */
 async function rServers(){
   const o=await api('/overview');
-  let h=o.servers.map(s=>`<div class="card"><div class="row"><span class="dot ${s.online?'st-active':'st-expired'}"></span><b>${esc(s.name)}</b><span class="sp"></span>
-   <span class="pill">${s.enabled?'в подписке':'скрыт'}</span></div>
-   <div class="hint" style="margin-top:4px">${s.info?`${esc(s.info.domain)} · IP ${esc(s.info.ip)}<br>Reality SNI: ${esc(s.info.reality.sni_tcp)} / ${esc(s.info.reality.sni_xhttp)}`:''}<br>Агент: ${esc(s.url)}</div>
-   ${ME.is_owner?`<div class="wrap"><button class="b s" onclick="sEdit(${s.id},{enabled:${s.enabled?0:1}})">${s.enabled?'Скрыть из подписок':'Вернуть в подписки'}</button>
-   <button class="b s" onclick="sEdit(${s.id},{refresh_info:1})">Обновить параметры</button>
-   <button class="b s" onclick="sRen(${s.id})">Переименовать</button>
-   <button class="b r" onclick="sDel(${s.id})">Удалить</button></div>`:''}</div>`).join('');
-  if(ME.is_owner) h+=`<div class="card"><b>Добавить сервер</b><div class="hint">Данные выводит install.sh в режиме node</div>
-   <input id="sn" placeholder="Название, напр. NL-1"><input id="su" placeholder="URL агента https://…"><input id="ss" placeholder="Секрет агента">
-   <button class="b" style="width:100%" onclick="sAdd()">Добавить</button></div>`;
-  $('#v').innerHTML=h||'<div class="card hint">Серверов нет</div>';
-}
-async function sAdd(){try{await api('/servers','POST',{name:$('#sn').value,url:$('#su').value,secret:$('#ss').value});rServers()}catch(e){toast(e.message)}}
-async function sEdit(id,b){try{await api(`/servers/${id}`,'PATCH',b);rServers()}catch(e){toast(e.message)}}
-function sRen(id){inputM('Новое имя','','text',v=>{closeM();v&&sEdit(id,{name:v})})}
-async function sDel(id){if(await ask('Удалить сервер из панели? (на самом сервере ничего не удаляется)')){await api(`/servers/${id}`,'DELETE');rServers()}}
-
-async function rAdmins(){
-  const a=await api('/admins');
-  let h=a.map(x=>`<div class="card row"><span>${x.is_owner?'👑':'👤'}</span><div><b>${esc(x.name||'—')}</b><div class="hint">${x.tg_id}</div></div><span class="sp"></span>
-   ${ME.is_owner&&!x.is_owner?`<button class="b r" onclick="aDel(${x.tg_id})">Убрать</button>`:''}</div>`).join('');
-  if(ME.is_owner) h+=`<div class="card"><b>Добавить админа</b><div class="hint">Telegram ID можно узнать командой /id в боте</div>
-   <input id="ai" type="number" placeholder="Telegram ID"><input id="an" placeholder="Имя (необязательно)">
-   <button class="b" style="width:100%" onclick="aAdd()">Добавить</button></div>`;
-  else h+=`<div class="card hint">Добавлять админов может только владелец.</div>`;
+  let h = o.servers.map(s=>{
+    const i=s.info||{}, r=i.reality||{}, bridge=s.role==='bridge';
+    return `<article class="card srv">${cat(srvMood(s), bridge?'var(--ginger)':COATS[(s.id-1)%COATS.length],52)}<div>
+     <div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${bridge?'pink':''}">${bridge?'мост':'выход'}</span></div>
+     <div class="mute small">${bridge?`IP ${esc(i.ip)}, SNI ${esc(r.sni_tcp)}`:`${esc(i.domain)}, IP ${esc(i.ip)}<br>Reality: ${esc(r.sni_tcp)}, ${esc(r.sni_xhttp)}`}</div>
+     <div class="mute small">${s.enabled?'Есть в подписках':'Скрыт из подписок'}</div>
+     ${ME.is_owner&&!bridge?`<label class="switch"><input type="checkbox" ${s.cascade?'checked':''} onchange="sEdit(${s.id},{cascade:this.checked?1:0})"><s></s>Выход для каскада</label>`:''}
+     ${ME.is_owner?`<div class="btns"><button class="btn soft" onclick="sEdit(${s.id},{enabled:${s.enabled?0:1}})">${s.enabled?'Скрыть из подписок':'Вернуть в подписки'}</button>
+      <button class="btn soft" onclick="sEdit(${s.id},{refresh_info:1})">Обновить параметры</button>
+      <button class="btn soft" onclick="sRen(${s.id})">Переименовать</button>
+      <button class="btn danger" onclick="sDel(${s.id})">Удалить</button></div>`:''}</div></article>`}).join('');
+  if(!o.servers.length) h = `<div class="card empty">${cat('sleepy','#D9D3E6',72)}<p>Серверов пока нет.</p></div>`;
+  if(ME.is_owner) h += `<h2>Добавить сервер</h2><div class="card">
+   <div class="mute small">Обычная нода: <code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) node</code>
+   Мост на российском VPS: <code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) bridge</code>
+   Установщик в конце покажет код подключения или URL с секретом.</div>
+   <label for="sn">Название</label><input id="sn" placeholder="например, NL-1 или RU-Яндекс">
+   <label for="su">Код подключения моста или URL агента</label><input id="su" placeholder="eyJ1Ijo… или https://…">
+   <label for="ss">Секрет агента (только для URL)</label><input id="ss" placeholder="не нужен, если вставлен код">
+   <button class="btn wide" onclick="sAdd(this)">Добавить сервер</button></div>`;
   $('#v').innerHTML=h;
 }
-async function aAdd(){try{await api('/admins','POST',{tg_id:+$('#ai').value,name:$('#an').value});rAdmins()}catch(e){toast(e.message)}}
+async function sAdd(b){b.disabled=true;try{await api('/servers','POST',{name:$('#sn').value,url:$('#su').value,secret:$('#ss').value});haptic('success');rServers()}catch(e){toast(e.message);b.disabled=false}}
+async function sEdit(id,b){try{await api(`/servers/${id}`,'PATCH',b);haptic('success');rServers()}catch(e){toast(e.message);rServers()}}
+function sRen(id){inputS('Новое имя сервера','','text',v=>{closeS();v&&sEdit(id,{name:v})})}
+async function sDel(id){if(await ask('Убрать сервер из панели? На самом сервере ничего не удалится.')){await api(`/servers/${id}`,'DELETE');rServers()}}
+
+/* ---------- админы ---------- */
+async function rAdmins(){
+  const a=await api('/admins');
+  let h=a.map((x,i)=>`<div class="card row">${cat(x.is_owner?'happy':'awake',x.is_owner?'var(--ginger)':COATS[i%COATS.length],40)}
+   <div class="grow"><b>${esc(x.name||'Без имени')}</b><div class="mute small">${x.is_owner?'Владелец':'Админ'}, ID ${x.tg_id}</div></div>
+   ${ME.is_owner&&!x.is_owner?`<button class="btn danger" onclick="aDel(${x.tg_id})">Убрать</button>`:''}</div>`).join('');
+  if(ME.is_owner) h+=`<h2>Добавить админа</h2><div class="card"><div class="mute small" style="margin-bottom:8px">Пусть человек отправит боту /id — так вы узнаете его Telegram ID. Админ управляет ключами, но не серверами.</div>
+   <label for="ai">Telegram ID</label><input id="ai" type="number" inputmode="numeric"><label for="an">Имя</label><input id="an" placeholder="необязательно">
+   <button class="btn wide" onclick="aAdd(this)">Добавить админа</button></div>`;
+  else h+=`<div class="card mute small">Добавлять и убирать админов может только владелец.</div>`;
+  $('#v').innerHTML=h;
+}
+async function aAdd(b){b.disabled=true;try{await api('/admins','POST',{tg_id:+$('#ai').value,name:$('#an').value});haptic('success');rAdmins()}catch(e){toast(e.message);b.disabled=false}}
 async function aDel(id){if(await ask('Убрать админа?')){await api(`/admins/${id}`,'DELETE');rAdmins()}}
 
+/* ---------- старт ---------- */
+$('#boot').innerHTML = cat('awake','#FFF6E9',72) + '<p class="mute">Зовём котов…</p>';
 (async()=>{
-  if(!tg.initData){$('#v').innerHTML='<div class="card">Откройте панель из Telegram-бота.</div>';return}
-  try{ME=await api('/me')}catch(e){$('#v').innerHTML=`<div class="card">Нет доступа: ${esc(e.message)}</div>`;return}
-  render(); setInterval(()=>{if(TAB==='status'&&$('#modal').style.display!=='flex')render()},15000);
+  if(!tg.initData){$('#v').innerHTML=`<div class="card empty">${cat('awake','#FFF6E9',72)}<p>Откройте панель из Telegram-бота: команда /start, кнопка «Открыть панель».</p></div>`;return}
+  try{ME=await api('/me')}catch(e){$('#v').innerHTML=`<div class="card empty">${cat('worried','#D9D3E6',72)}<p>Нет доступа: ${esc(e.message)}</p></div>`;return}
+  render(); setInterval(()=>{if(TAB==='status'&&!$('#sheet').classList.contains('open'))render()},15000);
 })();
 </script>
 </body>

@@ -2,9 +2,10 @@
 # xvpn — Xray (VLESS: XHTTP via Cloudflare CDN + Reality + XHTTP-Reality) с Telegram-ботом и мини-аппом.
 #   bash install.sh panel   — главный сервер: Xray + агент + бот/панель
 #   bash install.sh node    — дополнительный сервер: Xray + агент (подключается в панели)
+#   bash install.sh bridge  — мост каскада (российский VPS): клиенты → мост → ноды-выходы; домен не нужен
 #   bash install.sh update  — обновить код, Xray и перезапустить сервисы
 #   bash install.sh info    — показать данные для подключения ноды
-# Все вопросы можно заранее задать переменными окружения (DOMAIN, BOT_TOKEN, OWNER_ID, CERT_FILE, KEY_FILE, SNI_TCP, SNI_XHTTP, NODE_NAME).
+# Все вопросы можно заранее задать переменными окружения (DOMAIN, BOT_TOKEN, OWNER_ID, CERT_FILE, KEY_FILE, SNI_TCP, SNI_XHTTP, NODE_NAME, AGENT_PORT).
 set -Eeuo pipefail
 trap 'printf "\033[1;31m✘ Ошибка в строке %s: %s\033[0m\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
@@ -35,7 +36,7 @@ read_pem() { # read_pem файл "что вставить"
 }
 
 [[ $EUID -eq 0 ]] || die "Запустите от root"
-[[ "$MODE" =~ ^(panel|node|update|info)$ ]] || die "Использование: bash install.sh panel|node|update|info"
+[[ "$MODE" =~ ^(panel|node|bridge|update|info)$ ]] || die "Использование: bash install.sh panel|node|bridge|update|info"
 
 # Запуск одной командой через curl: скачиваем исходники из репозитория и перезапускаемся из них
 REPO="${XVPN_REPO:-duboshin52/xvpn}"
@@ -52,6 +53,20 @@ fi
 show_info() {
   # shellcheck disable=SC1091
   source "$ETC/node.env"
+  if [[ "${ROLE:-exit}" == bridge ]]; then
+    local fp code
+    fp=$(openssl x509 -in "$ETC/agent-cert.pem" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')
+    code=$(jq -nc --arg u "https://$SERVER_IP:$AGENT_PORT" --arg s "$AGENT_SECRET" --arg f "$fp" '{u:$u,s:$s,f:$f}' \
+           | base64 -w0 | tr '+/' '-_' | tr -d '=')
+    echo
+    c "Мост готов. В мини-аппе: «Серверы» → «Добавить» → вставьте код подключения:"
+    echo
+    echo "$code"
+    echo
+    echo "Откройте в группе безопасности облака: TCP 443 (клиенты) и TCP $AGENT_PORT (панель)."
+    echo "Порт $AGENT_PORT лучше открыть только для IP сервера с панелью."
+    return
+  fi
   echo
   c "Данные ноды для панели (вкладка «Серверы» → Добавить):"
   echo "  URL агента: https://$DOMAIN/$AGENT_PATH"
@@ -63,7 +78,10 @@ install_packages() {
   c "Пакеты…"
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
   apt-get update -qq
-  apt-get install -y -qq curl openssl jq nginx libnginx-mod-stream python3 python3-venv python3-pip ca-certificates >/dev/null
+  local web="nginx libnginx-mod-stream"
+  [[ "$MODE" == bridge ]] && web=""  # мосту nginx не нужен: Xray слушает 443 сам
+  # shellcheck disable=SC2086
+  apt-get install -y -qq curl openssl jq $web python3 python3-venv python3-pip ca-certificates >/dev/null
 }
 
 install_xray() {
@@ -233,6 +251,53 @@ EOF
   chmod 600 "$ROOT/agent/node.json"
 }
 
+# Мост каскада: без домена и Cloudflare. Агент слушает публичный порт по TLS с самоподписанным
+# сертификатом — панель закрепляет его по SHA-256 отпечатку из кода подключения.
+configure_bridge() {
+  mkdir -p "$ETC" && chmod 700 "$ETC"
+  if [[ -f "$ETC/node.env" ]]; then
+    c "Найдена существующая конфигурация моста — используем её."
+    # shellcheck disable=SC1091
+    source "$ETC/node.env"
+  else
+    ask SNI_TCP "SNI для Reality (сайт из белого списка: ya.ru, vk.com…)" "ya.ru"
+    ask NODE_NAME "Название моста" "RU-$(hostname -s)"
+    ask AGENT_PORT "Порт агента для панели" "8443"
+    local keys
+    keys=$(/usr/local/bin/xray x25519)
+    REALITY_PRIV=$(echo "$keys" | sed -n 1p | awk -F': *' '{print $2}')
+    REALITY_PUB=$(echo "$keys" | sed -n 2p | awk -F': *' '{print $2}')
+    [[ -n "$REALITY_PRIV" && -n "$REALITY_PUB" ]] || die "Не удалось сгенерировать ключи Reality"
+    SHORT_ID=$(openssl rand -hex 8)
+    AGENT_SECRET=$(rnd 40)
+    SERVER_IP=$(curl -4 -fsS --max-time 10 https://api.ipify.org || curl -4 -fsS --max-time 10 https://ifconfig.me)
+    cat >"$ETC/node.env" <<EOF
+ROLE='bridge'
+SNI_TCP='$SNI_TCP'
+NODE_NAME='$NODE_NAME'
+AGENT_PORT='$AGENT_PORT'
+REALITY_PRIV='$REALITY_PRIV'
+REALITY_PUB='$REALITY_PUB'
+SHORT_ID='$SHORT_ID'
+AGENT_SECRET='$AGENT_SECRET'
+SERVER_IP='$SERVER_IP'
+EOF
+    chmod 600 "$ETC/node.env"
+  fi
+  if [[ ! -s "$ETC/agent-cert.pem" ]]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+      -keyout "$ETC/agent-key.pem" -out "$ETC/agent-cert.pem" -subj "/CN=xvpn-bridge" \
+      -addext "subjectAltName=IP:$SERVER_IP" 2>/dev/null
+    chmod 600 "$ETC/agent-key.pem"
+  fi
+  mkdir -p "$ROOT/agent"
+  jq -n --arg ip "$SERVER_IP" --arg s "$AGENT_SECRET" --arg pk "$REALITY_PRIV" --arg pub "$REALITY_PUB" \
+        --arg sid "$SHORT_ID" --arg st "$SNI_TCP" \
+    '{role:"bridge", ip:$ip, port:443, agent_secret:$s,
+      reality:{private_key:$pk, public_key:$pub, short_id:$sid, sni_tcp:$st}}' >"$ROOT/agent/node.json"
+  chmod 600 "$ROOT/agent/node.json"
+}
+
 write_nginx() {
   # shellcheck disable=SC1091
   source "$ETC/node.env"
@@ -317,6 +382,12 @@ EOF
 }
 
 write_agent_service() {
+  local listen="--host 127.0.0.1 --port 8081"
+  # shellcheck disable=SC1091
+  source "$ETC/node.env"
+  if [[ "${ROLE:-exit}" == bridge ]]; then
+    listen="--host 0.0.0.0 --port $AGENT_PORT --ssl-keyfile $ETC/agent-key.pem --ssl-certfile $ETC/agent-cert.pem"
+  fi
   cat >/etc/systemd/system/xvpn-agent.service <<EOF
 [Unit]
 Description=xvpn node agent
@@ -324,7 +395,7 @@ After=network.target xray.service
 
 [Service]
 WorkingDirectory=$ROOT/agent
-ExecStart=$ROOT/agent/venv/bin/uvicorn agent:app --host 127.0.0.1 --port 8081 --log-level warning
+ExecStart=$ROOT/agent/venv/bin/uvicorn agent:app $listen --log-level warning
 Restart=always
 RestartSec=3
 
@@ -387,6 +458,23 @@ EOF
 }
 
 case "$MODE" in
+  bridge)
+    if [[ -f "$ETC/node.env" ]] && ! grep -q "^ROLE='bridge'" "$ETC/node.env"; then
+      die "На этом сервере уже стоит обычная нода xvpn"
+    fi
+    install_packages
+    install_xray
+    enable_bbr
+    configure_bridge
+    copy_code
+    c "Python-окружение агента…"
+    setup_venv "$ROOT/agent" fastapi "uvicorn[standard]" psutil
+    write_agent_service
+    bootstrap_xray
+    systemctl daemon-reload
+    systemctl enable --now xvpn-agent >/dev/null 2>&1; systemctl restart xvpn-agent
+    show_info
+    ;;
   node|panel)
     install_packages
     install_xray
@@ -421,11 +509,13 @@ case "$MODE" in
   update)
     [[ -f "$ETC/node.env" ]] || die "xvpn не установлен"
     install_xray
-    configure_node
+    IS_BRIDGE=0
+    if grep -q "^ROLE='bridge'" "$ETC/node.env"; then IS_BRIDGE=1; configure_bridge; else configure_node; fi
     copy_code
     "$ROOT/agent/venv/bin/pip" install -q --upgrade fastapi "uvicorn[standard]" psutil
     [[ -f "$ETC/panel.env" ]] && "$ROOT/panel/venv/bin/pip" install -q --upgrade fastapi "uvicorn[standard]" httpx "aiogram>=3.7,<4"
-    write_nginx
+    write_agent_service
+    if [[ $IS_BRIDGE == 0 ]]; then write_nginx; fi
     systemctl daemon-reload
     systemctl restart xray xvpn-agent
     [[ -f "$ETC/panel.env" ]] && systemctl restart xvpn-panel
