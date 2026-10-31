@@ -372,16 +372,16 @@ configure_panel() {
   [[ "$OWNER_ID" =~ ^[0-9]+$ ]] || die "OWNER_ID должен быть числом"
   ask SUB_TITLE "Название VPN в приложениях" "xvpn"
   cat >"$ETC/panel.env" <<EOF
-BOT_TOKEN=$BOT_TOKEN
-OWNER_ID=$OWNER_ID
-DOMAIN=$DOMAIN
-PANEL_PATH=p-$(rnd 16)
-SUB_PATH=s-$(rnd 12)
-SUB_TITLE=$SUB_TITLE
-DB_PATH=$ROOT/panel/xvpn.db
-LOCAL_AGENT_URL=http://127.0.0.1:8081
-LOCAL_AGENT_SECRET=$AGENT_SECRET
-LOCAL_NAME=$NODE_NAME
+BOT_TOKEN="$BOT_TOKEN"
+OWNER_ID="$OWNER_ID"
+DOMAIN="$DOMAIN"
+PANEL_PATH="p-$(rnd 16)"
+SUB_PATH="s-$(rnd 12)"
+SUB_TITLE="$SUB_TITLE"
+DB_PATH="$ROOT/panel/xvpn.db"
+LOCAL_AGENT_URL="http://127.0.0.1:8081"
+LOCAL_AGENT_SECRET="$AGENT_SECRET"
+LOCAL_NAME="$NODE_NAME"
 EOF
   chmod 600 "$ETC/panel.env"
 }
