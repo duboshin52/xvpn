@@ -5,7 +5,7 @@
 #   bash install.sh update  — обновить код, Xray и перезапустить сервисы
 #   bash install.sh info    — показать данные для подключения ноды
 # Все вопросы можно заранее задать переменными окружения (DOMAIN, BOT_TOKEN, OWNER_ID, CERT_FILE, KEY_FILE, SNI_TCP, SNI_XHTTP, NODE_NAME).
-set -euo pipefail
+set -Eeuo pipefail
 trap 'printf "\033[1;31m✘ Ошибка в строке %s: %s\033[0m\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +16,7 @@ MODE="${1:-}"
 c() { printf '\033[1;36m%s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m✔ %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31m✘ %s\033[0m\n' "$*" >&2; exit 1; }
-rnd() { tr -dc 'a-z0-9' </dev/urandom | head -c "${1:-12}"; }
+rnd() { local s; s=$(openssl rand -hex 32); echo "${s:0:${1:-12}}"; }
 ask() { # ask VAR "вопрос" [default]
   local var=$1 q=$2 def=${3:-} val
   if [[ -n "${!var:-}" ]]; then return; fi
