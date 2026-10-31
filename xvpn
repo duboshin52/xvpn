@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# xvpn — управление VPN из SSH. На главном сервере работает с ключами и серверами
+# через локальный API (127.0.0.1:8080, токен из /etc/xvpn/panel.env); на остальных — код и статус.
+set -euo pipefail
+export LC_ALL=C.UTF-8  # ширина колонок с кириллицей считается в символах
+
+ETC=/etc/xvpn
+B=$'\033[1m'; G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
+[[ -t 1 ]] || { B=; G=; R=; Y=; D=; N=; }
+die() { printf '%s✘ %s%s\n' "$R" "$*" "$N" >&2; exit 1; }
+ok() { printf '%s✔ %s%s\n' "$G" "$*" "$N"; }
+
+usage() {
+  cat <<EOF
+${B}xvpn${N} — управление VPN
+
+${B}Ключи${N} (на главном сервере)
+  xvpn list                       все ключи
+  xvpn add ИМЯ [ДНЕЙ] [ГБ]        новый ключ (по умолчанию 30 дней; 0 — бессрочно/безлимит)
+  xvpn show ИМЯ                   ссылки, подписка и QR-код
+  xvpn qr ИМЯ [N]                 QR-код N-й ссылки (по умолчанию подписка или первая)
+  xvpn extend ИМЯ ДНЕЙ            продлить
+  xvpn forever ИМЯ                сделать бессрочным
+  xvpn limit ИМЯ ГБ               лимит трафика (0 — безлимит)
+  xvpn reset ИМЯ                  обнулить трафик
+  xvpn off|on ИМЯ                 выключить / включить
+  xvpn rename ИМЯ НОВОЕ           переименовать
+  xvpn regen ИМЯ                  перевыпустить (старые ссылки перестанут работать)
+  xvpn del ИМЯ                    удалить
+
+${B}Серверы${N} (на главном сервере)
+  xvpn servers                    серверы, роли, состояние, выходы каскада
+  xvpn server add КОД [ИМЯ]       подключить сервер-выход или мост по коду
+  xvpn server del ИМЯ|ID          убрать сервер из списка
+  xvpn server cascade ИМЯ|ID on|off   использовать ли сервер выходом для мостов
+  xvpn server hide|show ИМЯ|ID    скрыть из подписок / вернуть
+  xvpn sync                       синхронизировать сейчас
+
+${B}Этот сервер${N}
+  xvpn status                     состояние сервисов (и сводка на главном)
+  xvpn code                       код подключения этого сервера к главному
+  xvpn update                     обновить xvpn и Xray
+EOF
+}
+
+is_main() { [[ -f "$ETC/panel.env" ]]; }
+need_main() { is_main || die "Это не главный сервер. Ключами и серверами управляют на главном."; }
+
+api() { # api METHOD PATH [JSON]
+  # shellcheck disable=SC1091
+  source "$ETC/panel.env"
+  local out code
+  out=$(curl -sS --noproxy '*' -X "$1" "http://127.0.0.1:8080/${PANEL_PATH}/api$2" \
+        -H "X-CLI-Token: $CLI_TOKEN" -H 'Content-Type: application/json' ${3:+--data "$3"} \
+        -w $'\n%{http_code}' 2>&1) || die "Главный сервер не отвечает (systemctl status xvpn-panel)"
+  code=${out##*$'\n'}; out=${out%$'\n'*}
+  if [[ "$code" != 2* ]]; then
+    die "$(jq -r '.detail // .' <<<"$out" 2>/dev/null || echo "$out")"
+  fi
+  printf '%s' "$out"
+}
+
+num() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "«$1» — не число"; }
+pad() { local s=$1 w=$2; printf '%s%*s' "$s" $(( w > ${#s} ? w - ${#s} : 1 )) ''; }
+fb() { [[ "${1:-0}" -lt 1024 ]] && { echo "${1:-0} Б"; return; }; numfmt --to=iec-i --suffix=Б --format='%.1f' "${1:-0}" 2>/dev/null | sed 's/KiБ/ КБ/;s/MiБ/ МБ/;s/GiБ/ ГБ/;s/TiБ/ ТБ/' || echo "$1"; }
+day() { [[ "${1:-0}" == 0 ]] && echo "бессрочно" || echo "до $(date -d "@$1" '+%d.%m.%Y')"; }
+
+key_id() { # ИМЯ или ID → id
+  local keys n
+  keys=$(api GET /keys)
+  n=$(jq --arg k "$1" '[.[] | select(.name == $k or (.id|tostring) == $k)] | length' <<<"$keys")
+  [[ "$n" == 0 ]] && die "Ключа «$1» нет (xvpn list)"
+  [[ "$n" -gt 1 ]] && die "Ключей с именем «$1» несколько — укажите ID (xvpn list)"
+  jq -r --arg k "$1" '.[] | select(.name == $k or (.id|tostring) == $k) | .id' <<<"$keys"
+}
+srv_id() {
+  local s n
+  s=$(api GET /overview)
+  n=$(jq --arg k "$1" '[.servers[] | select(.name == $k or (.id|tostring) == $k)] | length' <<<"$s")
+  [[ "$n" == 0 ]] && die "Сервера «$1» нет (xvpn servers)"
+  [[ "$n" -gt 1 ]] && die "Серверов с именем «$1» несколько — укажите ID"
+  jq -r --arg k "$1" '.servers[] | select(.name == $k or (.id|tostring) == $k) | .id' <<<"$s"
+}
+
+cmd_list() {
+  local keys
+  keys=$(api GET /keys)
+  [[ $(jq length <<<"$keys") == 0 ]] && { echo "Ключей пока нет. Создайте: xvpn add ИМЯ"; return; }
+  printf '%s%s%s%s%s%s%s\n' "$B" "$(pad ID 5)" "$(pad ИМЯ 23)" "$(pad СОСТОЯНИЕ 16)" "$(pad ТРАФИК 22)" СРОК "$N"
+  jq -r '.[] | [.id, .name, .state, (.online|tostring), .used_bytes, .limit_bytes, .expire_at] | @tsv' <<<"$keys" |
+  while IFS=$'\t' read -r id name state online used lim exp; do
+    local st col
+    case $state in active) st="активен"; col=$G ;; disabled) st="выключен"; col=$D ;; expired) st="срок истёк"; col=$R ;; *) st="лимит"; col=$Y ;; esac
+    [[ "$online" == true ]] && st="онлайн"
+    printf '%s%s%s%s%s%s%s\n' "$(pad "$id" 5)" "$(pad "${name:0:22}" 23)" "$col" "$(pad "$st" 16)" "$N" \
+      "$(pad "$(fb "$used") / $([[ $lim == 0 ]] && echo '∞' || fb "$lim")" 22)" "$(day "$exp")"
+  done
+}
+
+cmd_show() {
+  local id L k
+  id=$(key_id "$1")
+  k=$(api GET /keys | jq --argjson i "$id" '.[] | select(.id == $i)')
+  L=$(api GET "/keys/$id/links")
+  echo "${B}$(jq -r .name <<<"$k")${N}  $(jq -r .state <<<"$k"), $(fb "$(jq -r .used_bytes <<<"$k")"), $(day "$(jq -r .expire_at <<<"$k")")"
+  if [[ $(jq -r '.sub_url // empty' <<<"$L") ]]; then
+    echo; echo "${B}Подписка${N} (Happ, Hiddify, v2RayTun, v2rayN):"; jq -r .sub_url <<<"$L"
+  fi
+  echo; echo "${B}Ссылки${N}:"
+  jq -r '.links | to_entries[] | "\(.key+1)) \(.value)"' <<<"$L"
+  [[ $(jq '.links | length' <<<"$L") == 0 ]] && echo "${Y}Серверов с этим ключом пока нет — xvpn servers${N}"
+  cmd_qr "$1" "" "$L"
+}
+
+cmd_qr() { # ИМЯ [N] [готовые links]
+  local L text
+  L=${3:-$(api GET "/keys/$(key_id "$1")/links")}
+  if [[ -n "${2:-}" ]]; then text=$(jq -r --argjson n "$2" '.links[$n-1] // empty' <<<"$L")
+  else text=$(jq -r '.sub_url // .links[0] // empty' <<<"$L"); fi
+  [[ -n "$text" ]] || return 0
+  command -v qrencode >/dev/null || { echo "${D}(для QR установите qrencode)${N}"; return; }
+  echo; qrencode -t ansiutf8 "$text"
+}
+
+edit() { api PATCH "/keys/$(key_id "$1")" "$2" >/dev/null; ok "$3"; }
+
+cmd_servers() {
+  local o
+  o=$(api GET /overview)
+  [[ $(jq '.servers | length' <<<"$o") == 0 ]] && { echo "Серверов нет."; return; }
+  jq -r '.servers[] | [.id, .name, .role, (.online|tostring), ((.status.xray.active // false)|tostring),
+          .cascade, .enabled, (.info.ip // "?"), (.info.domain // "")] | @tsv' <<<"$o" |
+  while IFS=$'\t' read -r id name role online xr cas en ip dom; do
+    local st
+    if [[ $online != true ]]; then st="${R}нет связи${N}"
+    elif [[ $xr != true ]]; then st="${Y}Xray остановлен${N}"
+    else st="${G}работает${N}"; fi
+    printf "${B}%s${N} %s  %s  %s\n" "$id" "$name" "$([[ $role == bridge ]] && echo '[мост]' || echo '[выход]')" "$st"
+    printf "   %s%s" "$ip" "${dom:+, $dom}"
+    [[ $role == exit ]] && printf ", выход для каскада: %s" "$([[ $cas == 1 ]] && echo да || echo нет)"
+    [[ $en == 0 ]] && printf ", ${D}скрыт из подписок${N}"
+    echo
+    if [[ $role == bridge ]]; then
+      jq -r --argjson i "$id" '.servers[] | select(.id == $i) | (.status.exits // [])[] |
+         "\(.name)\t\(.proto)\t\(.alive)\t\(.delay // "")"' <<<"$o" |
+      while IFS=$'\t' read -r en pr al dl; do
+        if [[ $al == true ]]; then printf '     → %s%s%sживой%s %s мс\n' "$(pad "$en" 13)" "$(pad "$pr" 7)" "$G" "$N" "$dl"
+        else printf '     → %s%s%sнедоступен%s\n' "$(pad "$en" 13)" "$(pad "$pr" 7)" "$R" "$N"; fi
+      done
+    fi
+  done
+}
+
+cmd_status() {
+  local s
+  for s in xray xvpn-agent xvpn-panel nginx; do
+    systemctl cat "$s" >/dev/null 2>&1 || continue
+    if systemctl is-active --quiet "$s"; then printf "  %-12s ${G}работает${N}\n" "$s"
+    else printf "  %-12s ${R}%s${N}\n" "$s" "$(systemctl is-active "$s" || true)"; fi
+  done
+  if is_main; then
+    local o
+    o=$(api GET /overview)
+    echo
+    printf "Ключей активно: %s из %s, онлайн: %s, трафик: %s\n" \
+      "$(jq .keys_active <<<"$o")" "$(jq .keys_total <<<"$o")" "$(jq .keys_online <<<"$o")" "$(fb "$(jq .traffic_total <<<"$o")")"
+    echo; cmd_servers
+  fi
+}
+
+src_install() { # путь к install.sh
+  if [[ -f /opt/xvpn/src/install.sh ]]; then echo /opt/xvpn/src/install.sh; return; fi
+  echo ""
+}
+
+[[ $EUID -eq 0 ]] || die "Запустите от root (sudo xvpn …)"
+cmd=${1:-help}; shift || true
+case "$cmd" in
+  help|-h|--help) usage ;;
+  list|ls) need_main; cmd_list ;;
+  add)
+    need_main; [[ -n "${1:-}" ]] || die "xvpn add ИМЯ [ДНЕЙ] [ГБ]"
+    num "${2:-30}"; num "${3:-0}"
+    body=$(jq -nc --arg n "$1" --argjson d "${2:-30}" --argjson g "${3:-0}" '{name:$n,days:$d,gb:$g}')
+    api POST /keys "$body" >/dev/null
+    ok "Ключ «$1» создан"; echo; cmd_show "$1" ;;
+  show) need_main; [[ -n "${1:-}" ]] || die "xvpn show ИМЯ"; cmd_show "$1" ;;
+  qr) need_main; [[ -n "${1:-}" ]] || die "xvpn qr ИМЯ [N]"; cmd_qr "$1" "${2:-}" ;;
+  extend) need_main; [[ -n "${2:-}" ]] || die "xvpn extend ИМЯ ДНЕЙ"; num "$2"
+    edit "$1" "$(jq -nc --argjson d "$2" '{add_days:$d}')" "Ключ «$1» продлён на $2 дн." ;;
+  forever) need_main; edit "${1:?ИМЯ}" '{"unlimited_time":1}' "Ключ «$1» теперь бессрочный" ;;
+  limit) need_main; [[ -n "${2:-}" ]] || die "xvpn limit ИМЯ ГБ"; num "$2"
+    edit "$1" "$(jq -nc --argjson g "$2" '{limit_gb:$g}')" "Лимит ключа «$1»: $([[ $2 == 0 ]] && echo безлимит || echo "$2 ГБ")" ;;
+  reset) need_main; edit "${1:?ИМЯ}" '{"reset_traffic":1}' "Трафик ключа «$1» обнулён" ;;
+  off) need_main; edit "${1:?ИМЯ}" '{"enabled":0}' "Ключ «$1» выключен" ;;
+  on) need_main; edit "${1:?ИМЯ}" '{"enabled":1}' "Ключ «$1» включён" ;;
+  rename) need_main; [[ -n "${2:-}" ]] || die "xvpn rename ИМЯ НОВОЕ"
+    edit "$1" "$(jq -nc --arg n "$2" '{name:$n}')" "«$1» → «$2»" ;;
+  regen) need_main; edit "${1:?ИМЯ}" '{"regen":1}' "Ключ «$1» перевыпущен"; cmd_show "$1" ;;
+  del|rm) need_main; id=$(key_id "${1:?ИМЯ}"); api DELETE "/keys/$id" >/dev/null; ok "Ключ «$1» удалён" ;;
+  servers) need_main; cmd_servers ;;
+  server)
+    need_main; sub=${1:-}; shift || true
+    case "$sub" in
+      add) [[ -n "${1:-}" ]] || die "xvpn server add КОД [ИМЯ]"
+        api POST /servers "$(jq -nc --arg c "$1" --arg n "${2:-}" '{code:$c,name:$n}')" >/dev/null
+        ok "Сервер подключён. Синхронизация займёт до минуты."; cmd_servers ;;
+      del|rm) id=$(srv_id "${1:?ИМЯ|ID}"); api DELETE "/servers/$id" >/dev/null; ok "Сервер убран из списка" ;;
+      cascade) id=$(srv_id "${1:?ИМЯ|ID}"); [[ "${2:-}" =~ ^(on|off)$ ]] || die "xvpn server cascade ИМЯ on|off"
+        api PATCH "/servers/$id" "$(jq -nc --argjson v "$([[ $2 == on ]] && echo 1 || echo 0)" '{cascade:$v}')" >/dev/null
+        ok "Выход для каскада: $2" ;;
+      hide|show) id=$(srv_id "${1:?ИМЯ|ID}")
+        api PATCH "/servers/$id" "$([[ $sub == hide ]] && echo '{"enabled":0}' || echo '{"enabled":1}')" >/dev/null
+        ok "$([[ $sub == hide ]] && echo 'Скрыт из подписок' || echo 'Возвращён в подписки')" ;;
+      *) die "xvpn server add|del|cascade|hide|show" ;;
+    esac ;;
+  sync) need_main; api POST /sync >/dev/null; ok "Синхронизировано" ;;
+  status) cmd_status ;;
+  code|info) inst=$(src_install); [[ -n "$inst" ]] || die "Нет /opt/xvpn/src — выполните xvpn update"; bash "$inst" code ;;
+  update)
+    exec bash <(curl -fsSL "https://raw.githubusercontent.com/${XVPN_REPO:-duboshin52/xvpn}/${XVPN_BRANCH:-main}/install.sh") update ;;
+  *) usage; exit 1 ;;
+esac

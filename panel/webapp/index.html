@@ -350,9 +350,9 @@ async function rServers(){
   if(ME.is_owner) h += `<h2>Добавить сервер</h2><div class="card">
    <div class="mute small">Обычная нода: <code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) node</code>
    Мост на российском VPS: <code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) bridge</code>
-   Установщик в конце покажет код подключения или URL с секретом.</div>
+   Установщик в конце покажет код подключения. Его же можно добавить командой <b>xvpn server add КОД</b>.</div>
    <label for="sn">Название</label><input id="sn" placeholder="например, NL-1 или RU-Яндекс">
-   <label for="su">Код подключения моста или URL агента</label><input id="su" placeholder="eyJ1Ijo… или https://…">
+   <label for="su">Код подключения или URL агента</label><input id="su" placeholder="eyJ1Ijo… или https://…">
    <label for="ss">Секрет агента (только для URL)</label><input id="ss" placeholder="не нужен, если вставлен код">
    <button class="btn wide" onclick="sAdd(this)">Добавить сервер</button></div>`;
   $('#v').innerHTML=h;

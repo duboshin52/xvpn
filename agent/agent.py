@@ -127,7 +127,7 @@ def build_config(node: dict, users: list[dict], upstreams: list[dict] | None = N
     plain = [{"id": u["uuid"], "email": u["email"]} for u in users]
     vision = [{"id": u["uuid"], "email": u["email"], "flow": "xtls-rprx-vision"} for u in users]
     sniff = {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True}
-    return {
+    cfg = {
         "log": {"loglevel": "warning"},
         "api": {"tag": "api", "services": ["StatsService"]},
         "stats": {},
@@ -172,6 +172,20 @@ def build_config(node: dict, users: list[dict], upstreams: list[dict] | None = N
             {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
         ]},
     }
+    if not node.get("domain"):
+        # нода без домена: только Reality и XHTTP-Reality (nginx разводит их по SNI на 443)
+        cfg["inbounds"] = [i for i in cfg["inbounds"] if i["tag"] != "xhttp-cdn"]
+    w = node.get("warp")
+    if w:
+        # IPv6-only сервер: IPv4-сайты идут через Cloudflare WARP
+        cfg["outbounds"][0]["settings"] = {"domainStrategy": "UseIPv6"}
+        cfg["outbounds"].insert(1, {"tag": "warp", "protocol": "wireguard", "settings": {
+            "secretKey": w["secret_key"], "address": w["address"], "mtu": 1280, "noKernelTun": True,
+            "peers": [{"publicKey": w["public_key"], "endpoint": w["endpoint"],
+                       "allowedIPs": ["0.0.0.0/0", "::/0"]}]}})
+        cfg["routing"]["domainStrategy"] = "IPIfNonMatch"
+        cfg["routing"]["rules"].append({"type": "field", "ip": ["0.0.0.0/0"], "outboundTag": "warp"})
+    return cfg
 
 
 def run(cmd: list[str], timeout=20) -> subprocess.CompletedProcess:
@@ -221,11 +235,11 @@ def info():
     n = load_node()
     r = n["reality"]
     if role(n) == "bridge":
-        return {"role": "bridge", "ip": n["ip"], "port": int(n.get("port", 443)),
+        return {"role": "bridge", "name": n.get("name", ""), "ip": n["ip"], "port": int(n.get("port", 443)),
                 "reality": {"public_key": r["public_key"], "short_id": r["short_id"], "sni_tcp": r["sni_tcp"]}}
     return {
-        "role": "exit",
-        "domain": n["domain"], "ip": n["ip"], "xhttp_path": n["xhttp_path"],
+        "role": "exit", "name": n.get("name", ""),
+        "domain": n.get("domain") or None, "ip": n["ip"], "xhttp_path": n["xhttp_path"],
         "reality": {"public_key": r["public_key"], "short_id": r["short_id"],
                     "sni_tcp": r["sni_tcp"], "sni_xhttp": r["sni_xhttp"],
                     "xhttp_path": r["xhttp_path"]},

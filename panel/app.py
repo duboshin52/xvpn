@@ -1,4 +1,7 @@
-"""xvpn panel: Telegram-бот + мини-апп + подписки + синхронизация нод."""
+"""xvpn — главный сервер: ключи, подписки, синхронизация нод.
+
+Интерфейсы: команда xvpn в SSH (всегда, через локальный API с X-CLI-Token),
+Telegram-бот (если задан BOT_TOKEN) и мини-апп (если ещё и DOMAIN)."""
 import asyncio
 import base64
 import contextlib
@@ -26,15 +29,16 @@ from fastapi.responses import FileResponse, PlainTextResponse
 log = logging.getLogger("xvpn")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-OWNER_ID = int(os.environ["OWNER_ID"])
-DOMAIN = os.environ["DOMAIN"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+OWNER_ID = int(os.environ.get("OWNER_ID") or 0)
+DOMAIN = os.environ.get("DOMAIN", "")
+CLI_TOKEN = os.environ.get("CLI_TOKEN", "")
 PANEL_PATH = "/" + os.environ["PANEL_PATH"].strip("/")
 SUB_PATH = "/" + os.environ["SUB_PATH"].strip("/")
 DB_PATH = os.environ.get("DB_PATH", "/opt/xvpn/panel/xvpn.db")
 SUB_TITLE = os.environ.get("SUB_TITLE", "xvpn")
 SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL", "60"))
-WEBAPP_URL = f"https://{DOMAIN}{PANEL_PATH}/"
+WEBAPP_URL = f"https://{DOMAIN}{PANEL_PATH}/" if DOMAIN else ""
 HERE = os.path.dirname(os.path.abspath(__file__))
 GB = 1024 ** 3
 DAY = 86400
@@ -59,7 +63,8 @@ for _c, _d in (("role", "TEXT DEFAULT 'exit'"), ("cert", "TEXT"), ("bridge_uuid"
                ("cascade", "INTEGER DEFAULT 1")):
     if _c not in _cols:
         db.execute(f"ALTER TABLE servers ADD COLUMN {_c} {_d}")
-db.execute("INSERT OR IGNORE INTO admins(tg_id,name,is_owner) VALUES(?,?,1)", (OWNER_ID, "owner"))
+if OWNER_ID:
+    db.execute("INSERT OR IGNORE INTO admins(tg_id,name,is_owner) VALUES(?,?,1)", (OWNER_ID, "owner"))
 db.commit()
 
 
@@ -94,7 +99,7 @@ def key_state(k: dict) -> str:
 def key_out(k: dict) -> dict:
     k = dict(k)
     k["state"] = key_state(k)
-    k["sub_url"] = f"https://{DOMAIN}{SUB_PATH}/{k['sub_token']}"
+    k["sub_url"] = f"https://{DOMAIN}{SUB_PATH}/{k['sub_token']}" if DOMAIN else None
     k["online"] = k["last_active"] > time.time() - 180
     return k
 
@@ -113,18 +118,21 @@ def server_links(srv: dict, k: dict) -> list[str]:
         return []
     u, n, r = k["uuid"], srv["name"], info["reality"]
     tag = lambda t: quote(f"{n} {t} | {k['name']}")
+    h = f"[{info['ip']}]" if ":" in info["ip"] else info["ip"]  # IPv6 в ссылке — в скобках
     if info.get("role") == "bridge":
-        return [f"vless://{u}@{info['ip']}:{info.get('port', 443)}?encryption=none&security=reality"
+        return [f"vless://{u}@{h}:{info.get('port', 443)}?encryption=none&security=reality"
                 f"&sni={r['sni_tcp']}&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}"
                 f"&type=tcp&flow=xtls-rprx-vision#{tag('Каскад')}"]
-    return [
-        f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
-        f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={info['domain']}"
-        f"&path={quote(info['xhttp_path'], safe='')}&mode=auto#{tag('XHTTP-CDN')}",
-        f"vless://{u}@{info['ip']}:443?encryption=none&security=reality&sni={r['sni_tcp']}"
+    cdn = []
+    if info.get("domain"):
+        cdn = [f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
+               f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={info['domain']}"
+               f"&path={quote(info['xhttp_path'], safe='')}&mode=auto#{tag('XHTTP-CDN')}"]
+    return cdn + [
+        f"vless://{u}@{h}:443?encryption=none&security=reality&sni={r['sni_tcp']}"
         f"&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}&type=tcp&flow=xtls-rprx-vision"
         f"#{tag('Reality')}",
-        f"vless://{u}@{info['ip']}:443?encryption=none&security=reality&sni={r['sni_xhttp']}"
+        f"vless://{u}@{h}:443?encryption=none&security=reality&sni={r['sni_xhttp']}"
         f"&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}&type=xhttp"
         f"&path={quote(r['xhttp_path'], safe='')}&mode=auto#{tag('XHTTP-Reality')}",
     ]
@@ -277,7 +285,7 @@ async def sync_loop():
 
 
 # ---------------------------------------------------------------- bot
-bot = Bot(BOT_TOKEN)
+bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 dp = Dispatcher()
 
 
@@ -286,12 +294,17 @@ def is_admin(uid: int) -> dict | None:
 
 
 async def notify_admins(text: str):
+    log.info("notify: %s", text)
+    if not bot:
+        return
     for a in q("SELECT tg_id FROM admins"):
         with contextlib.suppress(Exception):
             await bot.send_message(a["tg_id"], text, parse_mode="HTML")
 
 
 async def set_menu(uid: int):
+    if not bot or not WEBAPP_URL:
+        return
     with contextlib.suppress(Exception):
         await bot.set_chat_menu_button(chat_id=uid, menu_button=MenuButtonWebApp(
             text="Панель", web_app=WebAppInfo(url=WEBAPP_URL)))
@@ -311,7 +324,7 @@ async def cmd_start(m: Message):
         return await m.answer(f"Нет доступа. Ваш ID: <code>{m.from_user.id}</code>", parse_mode="HTML")
     await set_menu(m.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text="Открыть панель", web_app=WebAppInfo(url=WEBAPP_URL))]])
+        text="Открыть панель", web_app=WebAppInfo(url=WEBAPP_URL))]]) if WEBAPP_URL else None
     await m.answer("Управление VPN.\n\n/status — серверы\n/keys — ключи\n"
                    "/newkey имя [дней] [ГБ] — новый ключ\n/admins, /addadmin ID [имя], /deladmin ID",
                    reply_markup=kb)
@@ -366,7 +379,11 @@ async def cmd_newkey(m: Message, command: CommandObject):
         return await m.answer("Дни и ГБ — числа")
     k = key_out(create_key(args[0], days, gb, m.from_user.id))
     asyncio.create_task(sync_now())
-    await m.answer(f"Ключ <b>{k['name']}</b> создан.\nПодписка:\n<code>{k['sub_url']}</code>", parse_mode="HTML")
+    if k["sub_url"]:
+        return await m.answer(f"Ключ <b>{k['name']}</b> создан.\nПодписка:\n<code>{k['sub_url']}</code>",
+                              parse_mode="HTML")
+    links = "\n\n".join(f"<code>{l}</code>" for l in key_links(k))
+    await m.answer(f"Ключ <b>{k['name']}</b> создан.\n\n{links or 'Серверов пока нет'}", parse_mode="HTML")
 
 
 @dp.message(Command("admins"))
@@ -413,10 +430,11 @@ async def lifespan(_):
                (srv["name"], srv["url"], srv["secret"], json.dumps(info)))
         except Exception as e:
             log.warning("local agent not registered: %r", e)
-    tasks = [asyncio.create_task(sync_loop()),
-             asyncio.create_task(dp.start_polling(bot, handle_signals=False))]
-    for a in q("SELECT tg_id FROM admins"):
-        await set_menu(a["tg_id"])
+    tasks = [asyncio.create_task(sync_loop())]
+    if bot:
+        tasks.append(asyncio.create_task(dp.start_polling(bot, handle_signals=False)))
+        for a in q("SELECT tg_id FROM admins"):
+            await set_menu(a["tg_id"])
     yield
     for t in tasks:
         t.cancel()
@@ -426,7 +444,14 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
 _secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
 
 
-def tg_user(x_init_data: str = Header(default="")) -> dict:
+def tg_user(x_init_data: str = Header(default=""), x_cli_token: str = Header(default="")) -> dict:
+    # команда xvpn на этом сервере: токен из /etc/xvpn/panel.env, API слушает только 127.0.0.1
+    if CLI_TOKEN and x_cli_token and hmac.compare_digest(x_cli_token, CLI_TOKEN):
+        return {"id": 0, "first_name": "cli", "is_owner": True}
+    if x_cli_token:
+        raise HTTPException(401, "неверный CLI_TOKEN — проверьте /etc/xvpn/panel.env и перезапустите xvpn-panel")
+    if not BOT_TOKEN:
+        raise HTTPException(401, "bot disabled")
     data = dict(parse_qsl(x_init_data, keep_blank_values=True))
     h = data.pop("hash", "")
     check = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
@@ -545,9 +570,9 @@ def api_key_links(kid: int, u=Depends(tg_user)):
 
 @app.post(P + "/api/servers")
 async def api_server_add(body: dict, u=Depends(owner)):
-    srv = {"name": str(body.get("name", "")).strip()[:32] or "node",
+    srv = {"name": str(body.get("name", "")).strip()[:32],
            "url": str(body.get("url", "")).strip(), "secret": str(body.get("secret", "")).strip(), "cert": None}
-    if srv["url"] and not srv["url"].startswith("http"):  # во второе поле вставили код подключения моста
+    if srv["url"] and not srv["url"].startswith("http"):  # во второе поле вставили код подключения
         body["code"], srv["url"] = srv["url"], ""
     if body.get("code"):
         try:
@@ -566,6 +591,9 @@ async def api_server_add(body: dict, u=Depends(owner)):
         info = await agent(srv, "GET", "/info")
     except Exception as e:
         raise HTTPException(400, f"агент не отвечает: {e}")
+    if q("SELECT id FROM servers WHERE url=?", (srv["url"],)):
+        raise HTTPException(400, "этот сервер уже добавлен")
+    srv["name"] = srv["name"] or str(info.get("name") or "")[:32] or "node"
     srv_role = info.get("role", "exit")
     qx("INSERT INTO servers(name,url,secret,info,role,cert,bridge_uuid) VALUES(?,?,?,?,?,?,?)",
        (srv["name"], srv["url"], srv["secret"], json.dumps(info), srv_role, srv["cert"],
