@@ -3,11 +3,15 @@
 #   bash cascade.sh exit        — выходной сервер (Европа): VLESS+XHTTP+Reality, печатает ссылку для моста
 #   bash cascade.sh bridge      — входной сервер (Россия): принимает клиентов, РФ-сайты отдаёт напрямую,
 #                                 остальное — через выходной сервер
+#   bash cascade.sh exit-add ССЫЛКА [ИМЯ] — (bridge) добавить ещё один выходной сервер (резерв)
+#   bash cascade.sh exit-del ИМЯ — (bridge) убрать выходной сервер
+#   bash cascade.sh check       — (bridge) проверить каждый выходной сервер
 #   bash cascade.sh add ИМЯ     — (bridge) добавить клиента и показать его ссылку
 #   bash cascade.sh del ИМЯ     — (bridge) удалить клиента
 #   bash cascade.sh links       — показать ссылки ещё раз
 #   bash cascade.sh update      — обновить Xray и пересобрать конфиг
-# Переменные (чтобы не отвечать на вопросы): UPSTREAM (ссылка vless:// выходного сервера), SNI, PORT, CLIENT.
+# Переменные (чтобы не отвечать на вопросы): UPSTREAM (ссылки vless:// выходных серверов через пробел), SNI, PORT, CLIENT.
+# Несколько выходов: мост сам проверяет их каждые 30 с и ведёт трафик через самый быстрый живой (leastPing).
 set -Eeuo pipefail
 trap 'printf "\033[1;31m✘ Ошибка в строке %s: %s\033[0m\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
@@ -31,7 +35,8 @@ ask() { # ask VAR "вопрос" [default]
 }
 
 [[ $EUID -eq 0 ]] || die "Запустите от root (sudo -i)"
-[[ "$MODE" =~ ^(exit|bridge|add|del|links|update)$ ]] || die "Использование: bash cascade.sh exit|bridge|add ИМЯ|del ИМЯ|links|update"
+[[ "$MODE" =~ ^(exit|bridge|exit-add|exit-del|check|add|del|links|update)$ ]] \
+  || die "Использование: bash cascade.sh exit|bridge|exit-add ССЫЛКА [ИМЯ]|exit-del ИМЯ|check|add ИМЯ|del ИМЯ|links|update"
 
 # ---------- сеть ----------
 
@@ -135,7 +140,34 @@ STATE = "/etc/xvpn-cascade/state.json"
 
 def load():
     with open(STATE) as f:
-        return json.load(f)
+        s = json.load(f)
+    if "upstream" in s:  # старый формат: один выход
+        s["upstreams"] = [{"name": "eu1", "link": s.pop("upstream_link", ""), "outbound": s.pop("upstream")}]
+    return s
+
+def new_upstream(s, link, name=""):
+    ups = s.setdefault("upstreams", [])
+    if any(u["link"].split("#")[0] == link.split("#")[0] for u in ups):
+        raise SystemExit("Этот выход уже добавлен")
+    if not name:
+        n = 1
+        while any(u["name"] == f"eu{n}" for u in ups):
+            n += 1
+        name = f"eu{n}"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,24}", name):
+        raise SystemExit("Имя выхода: латиница, цифры, _ - (до 24 символов)")
+    if any(u["name"] == name for u in ups):
+        raise SystemExit(f"Выход {name} уже есть")
+    ups.append({"name": name, "link": link.strip(), "outbound": parse_vless(link)})
+    return name
+
+def exit_outbounds(s):
+    outs = []
+    for u in s["upstreams"]:
+        o = json.loads(json.dumps(u["outbound"]))
+        o["tag"] = "exit-" + u["name"]
+        outs.append(o)
+    return outs
 
 def save(s):
     tmp = STATE + ".tmp"
@@ -242,7 +274,10 @@ def build(s):
                    "streamSettings": {"network": "tcp", "security": "reality",
                                       "realitySettings": reality},
                    "sniffing": sniff}
-        outs = [s["upstream"], {"tag": "direct", "protocol": "freedom"}, block]
+        exits = exit_outbounds(s)
+        if not exits:
+            raise SystemExit("Нет ни одного выходного сервера")
+        outs = exits + [{"tag": "direct", "protocol": "freedom"}, block]
         rules = [{"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
                  {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
                  # российские сайты — напрямую с этого сервера
@@ -252,11 +287,34 @@ def build(s):
                                               "domain:mycdn.me", "domain:gosuslugi.ru"],
                   "outboundTag": "direct"},
                  {"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"},
-                 {"type": "field", "network": "tcp,udp", "outboundTag": "exit"}]
+                 {"type": "field", "network": "tcp,udp"}]
+        if len(exits) == 1:
+            rules[-1]["outboundTag"] = exits[0]["tag"]
+        else:
+            # несколько выходов: балансировщик выбирает самый быстрый живой, мёртвые исключаются
+            rules[-1]["balancerTag"] = "exits"
         ds = "IPIfNonMatch"
-    return {"log": {"loglevel": "warning"},
-            "inbounds": [inbound], "outbounds": outs,
-            "routing": {"domainStrategy": ds, "rules": rules}}
+    cfg = {"log": {"loglevel": "warning"},
+           "inbounds": [inbound], "outbounds": outs,
+           "routing": {"domainStrategy": ds, "rules": rules}}
+    if s["role"] == "bridge" and len(s["upstreams"]) > 1:
+        cfg["routing"]["balancers"] = [{"tag": "exits", "selector": ["exit-"],
+                                        "strategy": {"type": "leastPing"},
+                                        "fallbackTag": "exit-" + s["upstreams"][0]["name"]}]
+        cfg["observatory"] = {"subjectSelector": ["exit-"],
+                              "probeURL": "https://www.gstatic.com/generate_204",
+                              "probeInterval": "30s", "enableConcurrency": True}
+    return cfg
+
+def test_config(s, name, port):
+    """Временный конфиг: socks на 127.0.0.1:port → один выход (для проверки)."""
+    o = [x for x in exit_outbounds(s) if x["tag"] == "exit-" + name]
+    if not o:
+        raise SystemExit(f"Выхода {name} нет")
+    return {"log": {"loglevel": "none"},
+            "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "socks",
+                          "settings": {"udp": False}}],
+            "outbounds": o}
 
 def link(s, c):
     name = up.quote(f"{s.get('title', 'cascade')}-{c['name']}")
@@ -278,8 +336,8 @@ if cmd == "init":            # init ROLE IP PORT SNI PRIV PUB SID TITLE [UPSTREA
         s["v6only"] = sys.argv[12] == "1"
         s["clients"].append({"name": "bridge", "uuid": str(uuid.uuid4())})
     else:
-        s["upstream"] = parse_vless(extra)
-        s["upstream_link"] = extra
+        for l in extra.split():
+            new_upstream(s, l)
     save(s)
 elif cmd == "check-link":    # check-link LINK → печатает адрес выходного сервера
     o = parse_vless(sys.argv[2])
@@ -305,6 +363,24 @@ elif cmd == "links":         # links [NAME]
     for c in s["clients"]:
         if len(sys.argv) < 3 or c["name"] == sys.argv[2]:
             print(c["name"] + "\t" + link(s, c))
+elif cmd == "exit-add":      # exit-add LINK [NAME] → печатает имя
+    s = load(); name = new_upstream(s, sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""); save(s)
+    print(name)
+elif cmd == "exit-del":
+    s = load(); n = len(s["upstreams"])
+    s["upstreams"] = [u for u in s["upstreams"] if u["name"] != sys.argv[2]]
+    if len(s["upstreams"]) == n:
+        raise SystemExit(f"Выхода {sys.argv[2]} нет")
+    if not s["upstreams"]:
+        raise SystemExit("Нельзя удалить последний выход")
+    save(s)
+elif cmd == "exits":         # имя \t адрес
+    for u in load()["upstreams"]:
+        v = u["outbound"]["settings"]["vnext"][0]
+        print(f"{u['name']}\t{host(v['address'])}:{v['port']}")
+elif cmd == "test-config":   # test-config NAME PORT OUT
+    with open(sys.argv[4], "w") as f:
+        json.dump(test_config(load(), sys.argv[2], int(sys.argv[3])), f)
 elif cmd == "role":
     print(load()["role"])
 PY
@@ -348,6 +424,30 @@ save_self() {
     curl -fsSL -o "$me" "https://raw.githubusercontent.com/${XVPN_REPO:-duboshin52/xvpn}/${XVPN_BRANCH:-main}/cascade.sh" || return 0
   fi
   chmod +x "$me"
+}
+
+# Проверка каждого выхода: временный Xray с socks-входом → запрос через выход
+check_exits() {
+  local name addr port pid code i=0 tmp
+  tmp=$(mktemp -d)
+  while IFS=$'\t' read -r name addr; do
+    port=$((21080 + i)); i=$((i + 1))
+    py test-config "$name" "$port" "$tmp/$name.json"
+    $XRAY run -c "$tmp/$name.json" >/dev/null 2>&1 & pid=$!
+    sleep 1.5
+    code=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 12 \
+           -x "socks5h://127.0.0.1:$port" https://www.gstatic.com/generate_204 || true)
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    if [[ "$code" == 204* ]]; then ok "$name ($addr) — работает, ${code#* } с"
+    else warn "$name ($addr) — НЕ отвечает"; fi
+  done < <(py exits)
+  rm -rf "$tmp"
+}
+
+warn_v6() { # адрес выхода IPv6, а у моста нет IPv6
+  if [[ "$1" == *:* ]] && ! ip -6 route get "$1" >/dev/null 2>&1; then
+    warn "Выход $1 — IPv6-only, а у этого сервера нет IPv6: через него трафик не пойдёт."
+  fi
 }
 
 need_state() { [[ -f "$STATE" ]] || die "Каскад ещё не установлен на этом сервере"; }
@@ -394,13 +494,18 @@ do_bridge() {
 
   install_packages
   save_self
-  ask UPSTREAM "Ссылка vless:// выходного сервера"
-  local up_addr
-  up_addr=$(py check-link "$UPSTREAM") || die "Не удалось разобрать ссылку"
-  if [[ "$up_addr" == *:* ]] && ! ip -6 route get "$up_addr" >/dev/null 2>&1; then
-    warn "Выходной сервер IPv6-only, а у этого сервера нет IPv6 — каскад не заработает."
-    warn "Включите IPv6 на ВМ или используйте выход с IPv4."
+  if [[ -z "${UPSTREAM:-}" ]]; then
+    c "Ссылки vless:// выходных серверов — по одной; несколько = резервирование. Пустая строка — закончить."
+    local l n=1
+    while :; do
+      read -rp "Выход $n: " l </dev/tty
+      [[ -z "$l" ]] && { [[ -n "${UPSTREAM:-}" ]] && break; warn "Нужен хотя бы один выход"; continue; }
+      py check-link "$l" >/dev/null || { warn "Не похоже на ссылку vless://, ещё раз"; continue; }
+      UPSTREAM="${UPSTREAM:-} $l"; n=$((n + 1))
+    done
   fi
+  local l
+  for l in $UPSTREAM; do warn_v6 "$(py check-link "$l")"; done
   ask PORT "Порт" "443"
   port_free "$PORT" || die "Порт $PORT занят: $(ss -ltnpH "sport = :$PORT" | head -1)"
   ask SNI "SNI для Reality (сайт из белого списка)" "ya.ru"
@@ -414,16 +519,30 @@ do_bridge() {
   py add "$CLIENT"
   apply_config
   echo
-  ok "Мост готов: клиенты → этот сервер → выходной сервер. Российские сайты идут напрямую."
+  ok "Мост готов: клиенты → этот сервер → выходные серверы. Российские сайты идут напрямую."
+  c "Проверка выходов…"
+  check_exits
   show_links
   echo
-  echo "Ещё клиент: xvpn-cascade add ИМЯ · Удалить: xvpn-cascade del ИМЯ · Ссылки: xvpn-cascade links"
+  echo "Клиенты: xvpn-cascade add|del ИМЯ · Ссылки: xvpn-cascade links"
+  echo "Выходы:  xvpn-cascade exit-add ССЫЛКА · exit-del ИМЯ · check"
   echo "Проверьте, что в группе безопасности облака открыт TCP $PORT."
 }
 
 case "$MODE" in
   exit) do_exit ;;
   bridge) do_bridge ;;
+  exit-add)
+    need_state; [[ -n "$ARG" ]] || die "Укажите ссылку: xvpn-cascade exit-add 'vless://…' [ИМЯ]"
+    [[ $(py role) == bridge ]] || die "Выходы добавляют на российском сервере (bridge)"
+    warn_v6 "$(py check-link "$ARG")"
+    name=$(py exit-add "$ARG" "${3:-}"); apply_config; ok "Выход $name добавлен"; check_exits ;;
+  exit-del)
+    need_state; [[ -n "$ARG" ]] || die "Укажите имя выхода (список: xvpn-cascade check)"
+    py exit-del "$ARG"; apply_config; ok "Выход $ARG удалён" ;;
+  check)
+    need_state; [[ $(py role) == bridge ]] || die "Проверка выходов — на российском сервере (bridge)"
+    check_exits ;;
   add)
     need_state; [[ -n "$ARG" ]] || die "Укажите имя: xvpn-cascade add ИМЯ"
     [[ $(py role) == bridge ]] || die "Клиентов добавляют на российском сервере (bridge)"
