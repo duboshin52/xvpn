@@ -38,6 +38,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install
 
 Ответить на вопросы заранее можно переменными: `REINSTALL=update|clean|no`, а для удаления `YES=1`.
 
+### Установка без вопросов
+
+Все ответы можно передать переменными. Это удобно, когда серверов много:
+
+```bash
+# сервер-выход без домена
+DOMAIN= NODE_NAME=nl-2 SNI_TCP=www.samsung.com SNI_XHTTP=www.nvidia.com AGENT_PORT=8443 \
+  bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) node
+# мост
+NODE_NAME=ru-2 SNI_TCP=ya.ru AGENT_PORT=8443 \
+  bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) bridge
+```
+
+Чтобы выход был с доменом, добавьте `DOMAIN=nl2.ваш-домен CF_API_TOKEN=…`.
+
 ## Схемы
 
 ### 1. Один сервер
@@ -117,6 +132,8 @@ xvpn server add <код>
 | `xvpn servers` | серверы, роли, живость выходов каждого моста с пингом |
 | `xvpn server add КОД [ИМЯ]`, `server del` | подключить или убрать сервер |
 | `xvpn server cascade ИМЯ on/off`, `server hide/show ИМЯ` | роль выхода, видимость в подписках |
+| `xvpn server rename ИМЯ НОВОЕ` | переименовать сервер |
+| `xvpn cdn on/off` | XHTTP через Cloudflare в подписках: в России Cloudflare часто замедляют, тогда выключите |
 | `xvpn status`, `xvpn sync` | состояние сервисов, синхронизация |
 | `xvpn code` | код подключения этого сервера |
 | `xvpn update` | обновить xvpn и Xray (на любом сервере) |

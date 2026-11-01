@@ -51,6 +51,7 @@ db.executescript("""
 CREATE TABLE IF NOT EXISTS admins(tg_id INTEGER PRIMARY KEY, name TEXT, is_owner INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS servers(id INTEGER PRIMARY KEY, name TEXT, url TEXT, secret TEXT,
   info TEXT, enabled INTEGER DEFAULT 1, status TEXT, last_seen INTEGER DEFAULT 0, online INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS keys(id INTEGER PRIMARY KEY, name TEXT, uuid TEXT, sub_token TEXT UNIQUE,
   limit_bytes INTEGER DEFAULT 0, used_bytes INTEGER DEFAULT 0, expire_at INTEGER DEFAULT 0,
   enabled INTEGER DEFAULT 1, created_at INTEGER, created_by INTEGER, last_active INTEGER DEFAULT 0,
@@ -82,6 +83,20 @@ def qx(sql, args=()):
         cur = db.execute(sql, args)
         db.commit()
         return cur.lastrowid
+
+
+def setting(key: str, default: str = "") -> str:
+    r = q("SELECT value FROM settings WHERE key=?", (key,), one=True)
+    return r["value"] if r else default
+
+
+def set_setting(key: str, value: str):
+    qx("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def cdn_on() -> bool:
+    """XHTTP через Cloudflare в подписках. В РФ Cloudflare часто замедляют — тогда выключают."""
+    return setting("cdn", "1") == "1"
 
 
 # ---------------------------------------------------------------- keys
@@ -124,7 +139,7 @@ def server_links(srv: dict, k: dict) -> list[str]:
                 f"&sni={r['sni_tcp']}&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}"
                 f"&type=tcp&flow=xtls-rprx-vision#{tag('Каскад')}"]
     cdn = []
-    if info.get("domain"):
+    if info.get("domain") and cdn_on():
         cdn = [f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
                f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={info['domain']}"
                # packet-up: каждый кусок — отдельный запрос; через Cloudflare работает и без gRPC
@@ -507,7 +522,7 @@ def api_overview(u=Depends(tg_user)):
                         "last_seen": s["last_seen"], "status": st,
                         "info": json.loads(s["info"] or "null")})
     states = [key_state(k) for k in keys]
-    return {"servers": servers, "keys_total": len(keys), "keys_active": states.count("active"),
+    return {"servers": servers, "cdn": cdn_on(), "keys_total": len(keys), "keys_active": states.count("active"),
             "keys_online": sum(k["last_active"] > time.time() - 180 for k in keys),
             "traffic_total": sum(k["used_bytes"] for k in keys)}
 
@@ -643,6 +658,18 @@ async def api_server_restart(sid: int, u=Depends(tg_user)):
     if not s:
         raise HTTPException(404)
     return await agent(s, "POST", "/restart")
+
+
+@app.get(P + "/api/settings")
+def api_settings(u=Depends(tg_user)):
+    return {"cdn": cdn_on()}
+
+
+@app.patch(P + "/api/settings")
+def api_settings_edit(body: dict, u=Depends(owner)):
+    if "cdn" in body:
+        set_setting("cdn", "1" if body["cdn"] else "0")
+    return {"cdn": cdn_on()}
 
 
 @app.post(P + "/api/sync")
