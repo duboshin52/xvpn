@@ -590,7 +590,8 @@ async def api_server_add(body: dict, u=Depends(owner)):
     try:
         info = await agent(srv, "GET", "/info")
     except Exception as e:
-        raise HTTPException(400, f"агент не отвечает: {e}")
+        # у таймаутов httpx пустой текст — показываем тип ошибки и адрес
+        raise HTTPException(400, f"агент {srv['url']} не отвечает: {type(e).__name__} {e}".strip())
     if q("SELECT id FROM servers WHERE url=?", (srv["url"],)):
         raise HTTPException(400, "этот сервер уже добавлен")
     srv["name"] = srv["name"] or str(info.get("name") or "")[:32] or "node"
