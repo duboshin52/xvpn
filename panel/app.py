@@ -588,7 +588,15 @@ async def api_server_add(body: dict, u=Depends(owner)):
     if not srv["url"] or not srv["secret"]:
         raise HTTPException(400, "нужен код подключения или URL и секрет агента")
     try:
-        info = await agent(srv, "GET", "/info")
+        info = await agent(srv, "GET", "/info", timeout=40)
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        hint = {401: "неверный секрет — скопируйте код заново (xvpn code)",
+                404: "по этому адресу нет агента — домен указывает на другой сервер?",
+                521: "Cloudflare: сервер не принимает подключения на 443",
+                522: "Cloudflare: не дождался сервера на 443 — проверьте файрвол хостера",
+                525: "Cloudflare: ошибка TLS с сервером", 526: "Cloudflare: сертификат сервера не принят"}
+        raise HTTPException(400, f"агент {srv['url']} ответил {code}: {hint.get(code, e.response.text[:120])}")
     except Exception as e:
         # у таймаутов httpx пустой текст — показываем тип ошибки и адрес
         raise HTTPException(400, f"агент {srv['url']} не отвечает: {type(e).__name__} {e}".strip())

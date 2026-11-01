@@ -486,6 +486,8 @@ write_nginx() {
   # shellcheck disable=SC1091
   source "$ETC/node.env"
   mkdir -p /etc/nginx/stream.d
+  local v6listen=""  # слушать IPv6, только если он включён в системе
+  [[ -s /proc/net/if_inet6 ]] && v6listen=$'\n    listen [::]:443;'
   local dom_line=""
   [[ -n "$DOMAIN" ]] && dom_line="    $DOMAIN    127.0.0.1:8443;"
   # 443 делится по SNI: домен → nginx (Cloudflare/XHTTP/панель), SNI Reality → Xray
@@ -497,8 +499,7 @@ $dom_line
     default    127.0.0.1:4431;
 }
 server {
-    listen 443;
-    listen [::]:443;
+    listen 443;$v6listen
     ssl_preread on;
     proxy_pass \$xvpn_up;
     proxy_connect_timeout 5s;
@@ -533,8 +534,7 @@ EOF
     mkdir -p /var/www/xvpn
     cat >/etc/nginx/sites-available/xvpn.conf <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+    listen 80;$( [[ -n "$v6listen" ]] && printf '\n    listen [::]:80;' )
     server_name _;
     return 301 https://\$host\$request_uri;
 }
@@ -579,7 +579,9 @@ write_agent_service() {
   source "$ETC/node.env"
   local listen="--host 127.0.0.1 --port 8081"
   if [[ "${AGENT_MODE:-}" == tls || "${ROLE:-exit}" == bridge ]]; then
-    listen="--host :: --port $AGENT_PORT --ssl-keyfile $ETC/agent-key.pem --ssl-certfile $ETC/agent-cert.pem"
+    # «::» только для IPv6-сервера: на ВМ с выключенным IPv6 (Yandex Cloud и др.) uvicorn на «::» не стартует
+    local host=0.0.0.0; [[ "${SERVER_IP:-}" == *:* ]] && host="::"
+    listen="--host $host --port $AGENT_PORT --ssl-keyfile $ETC/agent-key.pem --ssl-certfile $ETC/agent-cert.pem"
   fi
   cat >/etc/systemd/system/xvpn-agent.service <<EOF
 [Unit]
