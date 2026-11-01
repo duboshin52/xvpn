@@ -268,7 +268,16 @@ cf_setup() {
 
   local body
   body=$(jq -nc --arg t "$rtype" --arg n "$DOMAIN" --arg ip "$SERVER_IP" '{type:$t,name:$n,content:$ip,proxied:true,ttl:1}')
-  rid=$(cf_api GET "/zones/$zid/dns_records?type=$rtype&name=$DOMAIN" | jq -r '.result[0].id // empty')
+  r=$(cf_api GET "/zones/$zid/dns_records?type=$rtype&name=$DOMAIN")
+  rid=$(jq -r '.result[0].id // empty' <<<"$r")
+  local cur; cur=$(jq -r '.result[0].content // empty' <<<"$r")
+  if [[ -n "$cur" && "$cur" != "$SERVER_IP" ]]; then
+    # домен уже занят другим сервером (например, главным) — перезапись его сломает
+    warn "$DOMAIN уже указывает на $cur, а этот сервер — $SERVER_IP."
+    warn "У каждого сервера должен быть свой домен (например, nl.$zone)."
+    local yn; read -rp "Перенаправить $DOMAIN на этот сервер? [д/Н]: " yn </dev/tty
+    [[ "$yn" =~ ^[YyДд] ]] || die "Отменено. Запустите заново и укажите другой поддомен."
+  fi
   if [[ -n "$rid" ]]; then r=$(cf_api PUT "/zones/$zid/dns_records/$rid" "$body")
   else r=$(cf_api POST "/zones/$zid/dns_records" "$body"); fi
   [[ $(jq -r .success <<<"$r") == true ]] || die "DNS: $(jq -c .errors <<<"$r")"
@@ -344,7 +353,7 @@ configure_exit() {
     echo
     c "Домен через Cloudflare даёт подписки и XHTTP через CDN (IP сервера скрыт)."
     [[ "$MODE" == server && "${BOT:-no}" == yes ]] && c "Для мини-аппа в Telegram домен обязателен; без него будет бот с командами."
-    ask_opt DOMAIN "Домен этого сервера (Enter — без домена)"
+    ask_opt DOMAIN "Домен этого сервера — свой для каждого сервера, например nl.example.com (Enter — без домена)"
     ask SNI_TCP "SNI для Reality (зарубежный сайт с TLS 1.3, лучше рядом с VPS)" "www.samsung.com"
     ask SNI_XHTTP "SNI для XHTTP-Reality (другой сайт)" "www.nvidia.com"
     ask NODE_NAME "Название сервера" "$(hostname -s)"
