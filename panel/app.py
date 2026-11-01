@@ -142,7 +142,9 @@ def server_links(srv: dict, k: dict) -> list[str]:
     rc = info.get("ru_cdn")
     if rc and rc.get("host"):
         # российский CDN: packet-up, отправка GET с данными в заголовках (POST там режут)
-        extra = quote(json.dumps({"uplinkHTTPMethod": "GET", "uplinkDataPlacement": "header"},
+        # пакеты до 1500 байт: крупнее не влезают в заголовки и получают 431
+        extra = quote(json.dumps({"uplinkHTTPMethod": "GET", "uplinkDataPlacement": "header",
+                                  "scMaxEachPostBytes": 1500, "scMinPostsIntervalMs": 10},
                                  separators=(",", ":")), safe="")
         cdn.append(f"vless://{u}@{rc['host']}:443?encryption=none&security=tls&sni={rc['host']}"
                    f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={rc['host']}"
