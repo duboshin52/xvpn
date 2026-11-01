@@ -99,6 +99,10 @@ menu() {
     7) Переустановить начисто
     8) Удалить xvpn с сервера
 
+  Дополнительно (на уже установленный сервер)
+    9) Веб-панель управления в браузере (HTTPS, логин/пароль, свой порт)
+   10) Балансировщик трафика — ротация выходов каскада (на главном сервере)
+
 EOF
   local n
   read -rp "Номер: " n </dev/tty
@@ -111,6 +115,8 @@ EOF
     6) MODE=code ;;
     7) MODE=reinstall ;;
     8) MODE=uninstall ;;
+    9) MODE=webadmin ;;
+    10) MODE=balancer ;;
     *) die "Нет такого пункта" ;;
   esac
 }
@@ -119,8 +125,8 @@ EOF
 [[ "$MODE" == info ]] && MODE=code
 [[ "$MODE" == panel ]] && { MODE=server; BOT=yes; }
 [[ "$MODE" == remove ]] && MODE=uninstall
-[[ "$MODE" =~ ^(server|node|bridge|update|code|reinstall|uninstall|rucdn)$ ]] \
-  || die "Использование: bash install.sh [server|panel|node|bridge|update|code|rucdn|reinstall|uninstall]"
+[[ "$MODE" =~ ^(server|node|bridge|update|code|reinstall|uninstall|rucdn|webadmin|balancer)$ ]] \
+  || die "Использование: bash install.sh [server|panel|node|bridge|update|code|rucdn|webadmin|balancer|reinstall|uninstall]"
 
 # ---------------------------------------------------------------- сеть
 
@@ -939,7 +945,164 @@ do_update() {
   systemctl daemon-reload
   systemctl restart xray xvpn-agent
   [[ -f "$ETC/panel.env" ]] && systemctl restart xvpn-panel
+  # дополнительные компоненты, если установлены
+  [[ -f /etc/systemd/system/xvpn-balancer.timer ]] && install_balancer
+  [[ -f /etc/xvpn/webadmin.env ]] && cp "$SRC/panel/webapp/admin.html" /opt/xvpn-webadmin/index.html 2>/dev/null || true
   ok "Обновлено"
+}
+
+# ---------------------------------------------------------------- балансировщик
+
+install_balancer() {
+  [[ -f "$ETC/panel.env" ]] || die "Балансировщик ставится на главный сервер (здесь нет панели)"
+  c "Балансировщик трафика (ротация выходов каскада)…"
+  mkdir -p "$ROOT/balancer"
+  cp "$SRC/balancer/balancer.py" "$ROOT/balancer/"
+  cp "$SRC/balancer/xvpn-balancer.service" "$SRC/balancer/xvpn-balancer.timer" /etc/systemd/system/
+  if [[ ! -f "$ETC/balancer.env" ]]; then
+    cp "$SRC/balancer/balancer.env.example" "$ETC/balancer.env"
+    chmod 600 "$ETC/balancer.env"
+  fi
+  systemctl daemon-reload
+  systemctl enable --now xvpn-balancer.timer >/dev/null 2>&1
+  python3 "$ROOT/balancer/balancer.py" || true
+  # shellcheck disable=SC1091
+  source "$ETC/balancer.env"
+  ok "Балансировщик включён: ротация каждые ${LIMIT_GB:-200} ГБ, активных выходов ${PAIR:-2}, сброс счётчиков ${RESET_DAY:-1}-го числа"
+  echo "  Настройки: $ETC/balancer.env · лог: journalctl -u xvpn-balancer"
+}
+
+# ---------------------------------------------------------------- веб-панель
+
+# HTTPS-страница управления (те же «коты», что в мини-аппе) на любом сервере:
+# Basic Auth + секретный путь + нестандартный порт; API панели — напрямую (на главном)
+# или через SSH-туннель с урезанным ключом (на любом другом сервере).
+install_webadmin() {
+  echo
+  c "Веб-панель управления на этом сервере"
+  local pp ct upstream main_ip=""
+  if [[ -f "$ETC/panel.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$ETC/panel.env"
+    pp=$PANEL_PATH; ct=$CLI_TOKEN; upstream="http://127.0.0.1:8080"
+  else
+    command -v jq >/dev/null || apt-get install -y -qq jq >/dev/null
+    ask WA_CODE "Код веб-панели (на главном сервере выполните: xvpn webadmin)"
+    local decoded
+    decoded=$(tr '_-' '/+' <<<"$WA_CODE" | base64 -d 2>/dev/null) || die "Код не читается"
+    main_ip=$(jq -r .ip <<<"$decoded"); pp=$(jq -r .p <<<"$decoded"); ct=$(jq -r .t <<<"$decoded")
+    [[ "$main_ip" =~ ^[0-9.]+$ && -n "$pp" && -n "$ct" ]] || die "Код повреждён"
+    upstream="http://127.0.0.1:18080"
+  fi
+  SERVER_IP=$(public_ip)
+  ask WA_PORT "Порт веб-панели" "9443"
+
+  install_packages 2>/dev/null || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; }
+  apt-get install -y -qq nginx autossh apache2-utils openssl >/dev/null
+
+  mkdir -p /opt/xvpn-webadmin /etc/xvpn-webadmin
+  cp "$SRC/panel/webapp/admin.html" /opt/xvpn-webadmin/index.html
+  [[ -s /etc/xvpn-webadmin/cert.pem ]] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    -nodes -days 3650 -keyout /etc/xvpn-webadmin/key.pem -out /etc/xvpn-webadmin/cert.pem \
+    -subj "/CN=xvpn-panel" 2>/dev/null
+
+  local wa_pass wa_path
+  wa_pass=$(rnd 12); wa_path="k-$(rnd 6)"
+  htpasswd -cb /etc/xvpn-webadmin/.htpasswd admin "$wa_pass" >/dev/null
+  chgrp www-data /etc/xvpn-webadmin/.htpasswd 2>/dev/null || true
+  chmod 640 /etc/xvpn-webadmin/.htpasswd; chmod 600 /etc/xvpn-webadmin/key.pem
+
+  if [[ -n "$main_ip" ]]; then
+    c "SSH-туннель к панели главного сервера ($main_ip)…"
+    [[ -f /root/.ssh/id_ed25519 ]] || ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N '' -q
+    local pub; pub=$(cat /root/.ssh/id_ed25519.pub)
+    echo
+    warn "Разрешите туннель на главном сервере, выполнив там:"
+    echo "  xvpn webadmin-allow '$pub'"
+    cat >/etc/systemd/system/xvpn-webtunnel.service <<EOF
+[Unit]
+Description=xvpn webadmin tunnel to panel API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=AUTOSSH_GATETIME=0
+ExecStart=/usr/bin/autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new -L 127.0.0.1:18080:127.0.0.1:8080 root@$main_ip
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload; systemctl enable --now xvpn-webtunnel >/dev/null 2>&1
+    local tries=0
+    until curl -sf -m 8 -H "X-CLI-Token: $ct" "http://127.0.0.1:18080/$pp/api/me" >/dev/null 2>&1; do
+      tries=$((tries+1)); [[ $tries -gt 30 ]] && die "Туннель так и не заработал — проверьте ключ на главном и запустите установку снова"
+      read -rp "Выполнили команду на главном? Enter — проверить снова: " </dev/tty
+      systemctl restart xvpn-webtunnel; sleep 3
+    done
+    ok "Туннель работает"
+  fi
+
+  cat >/etc/nginx/sites-available/xvpn-webadmin <<EOF
+# xvpn webadmin: HTTPS :$WA_PORT, Basic Auth, секретный путь
+limit_req_zone \$binary_remote_addr zone=wa:10m rate=6r/m;
+
+server {
+    listen $WA_PORT ssl;
+    server_name _;
+
+    ssl_certificate     /etc/xvpn-webadmin/cert.pem;
+    ssl_certificate_key /etc/xvpn-webadmin/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:wa_ssl:10m;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+
+    location / { return 404; }
+
+    location /$wa_path/ {
+        limit_req zone=wa burst=10 nodelay;
+        auth_basic "restricted";
+        auth_basic_user_file /etc/xvpn-webadmin/.htpasswd;
+        alias /opt/xvpn-webadmin/;
+        index index.html;
+        try_files \$uri \$uri/ =404;
+    }
+
+    location /$wa_path/api/ {
+        limit_req zone=wa burst=24 nodelay;
+        auth_basic "restricted";
+        auth_basic_user_file /etc/xvpn-webadmin/.htpasswd;
+        proxy_pass $upstream/$pp/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1;
+        proxy_set_header X-CLI-Token "$ct";
+        proxy_set_header X-Init-Data "";
+        proxy_read_timeout 30s;
+    }
+}
+EOF
+  ln -sf /etc/nginx/sites-available/xvpn-webadmin /etc/nginx/sites-enabled/xvpn-webadmin
+  nginx -t || die "Ошибка в конфиге nginx"
+  systemctl enable --now nginx >/dev/null 2>&1; systemctl reload nginx
+  if ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow "$WA_PORT"/tcp >/dev/null; fi
+
+  chmod 700 "$ETC" 2>/dev/null; cat >"$ETC/webadmin.env" <<EOF
+WA_PORT='$WA_PORT'
+WA_PATH='$wa_path'
+WA_USER='admin'
+WA_PASS='$wa_pass'
+EOF
+  chmod 600 "$ETC/webadmin.env"
+  echo
+  ok "Веб-панель готова:"
+  echo "  адрес:  https://$(url_host "$SERVER_IP"):$WA_PORT/$wa_path/"
+  echo "  логин:  admin"
+  echo "  пароль: $wa_pass"
+  echo "  (доступы также в $ETC/webadmin.env — команда «xvpn webadmin» покажет их снова)"
 }
 
 set_env() { # set_env КЛЮЧ ЗНАЧЕНИЕ — записать в node.env
@@ -1004,6 +1167,8 @@ run_mode() {
     update) do_update ;;
     code) show_code ;;
     rucdn) do_rucdn "$@" ;;
+    webadmin) install_webadmin ;;
+    balancer) install_balancer ;;
     uninstall) do_uninstall 0 ;;
     reinstall)
       installed || die "xvpn не установлен — выберите установку в меню"

@@ -45,6 +45,12 @@ ${B}Этот сервер${N}
   xvpn update                     обновить xvpn и Xray
   xvpn reinstall                  удалить и поставить заново начисто (с резервной копией)
   xvpn uninstall                  полностью удалить xvpn и Xray (с резервной копией)
+
+${B}Веб-панель и балансировщик${N}
+  xvpn webadmin                   на главном: код для установки веб-панели на другом сервере;
+                                  где панель стоит: показать адрес, логин и пароль
+  xvpn webadmin-allow 'ssh-…'     разрешить SSH-туннель веб-панели (на главном)
+  xvpn balancer                   установить/обновить балансировщик трафика (на главном)
 EOF
 }
 
@@ -222,6 +228,35 @@ case "$cmd" in
       *) die "xvpn server add|del|rename|cascade|hide|show" ;;
     esac ;;
   sync) need_main; api POST /sync >/dev/null; ok "Синхронизировано" ;;
+  webadmin)
+    if is_main; then
+      # код для установки веб-панели на любом другом сервере (bash install.sh webadmin)
+      # shellcheck disable=SC1091
+      source "$ETC/panel.env"
+      ip=$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+      echo "Код веб-панели:"; echo
+      jq -jnc --arg ip "$ip" --arg p "$PANEL_PATH" --arg t "$CLI_TOKEN" '{ip:$ip,p:$p,t:$t}' \
+        | base64 -w0 | tr '+/' '-_' | tr -d '='
+      echo; echo
+      echo "На сервере для веб-панели: bash <(curl -fsSL https://raw.githubusercontent.com/${XVPN_REPO:-duboshin52/xvpn}/${XVPN_BRANCH:-main}/install.sh) webadmin"
+    else
+      [[ -f /etc/xvpn/webadmin.env ]] || die "Веб-панель здесь не установлена (bash install.sh webadmin)"
+      # shellcheck disable=SC1091
+      source /etc/xvpn/webadmin.env
+      ip=$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+      echo "Веб-панель: https://$ip:$WA_PORT/$WA_PATH/"
+      echo "логин: $WA_USER   пароль: $WA_PASS"
+    fi ;;
+  webadmin-allow)
+    need_main; [[ "${1:-}" == ssh-* ]] || die "xvpn webadmin-allow 'ssh-ed25519 AAAA…'"
+    touch /root/.ssh/authorized_keys
+    if grep -qF "$1" /root/.ssh/authorized_keys; then ok "Такой ключ уже разрешён"
+    else
+      echo "command=\"\",no-pty,no-agent-forwarding,no-X11-forwarding,permitopen=\"127.0.0.1:8080\" $1 # webadmin-tunnel" >> /root/.ssh/authorized_keys
+      ok "Ключ туннеля веб-панели добавлен"
+    fi ;;
+  balancer) need_main; inst=$(src_install); [[ -n "$inst" ]] || die "Нет /opt/xvpn/src — выполните xvpn update"
+    exec bash "$inst" balancer ;;
   cdn)
     need_main
     case "${1:-}" in
