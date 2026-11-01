@@ -8,6 +8,8 @@
 #   bash install.sh bridge      — мост каскада на российском VPS (подключается к главному кодом)
 #   bash install.sh update      — обновить код и Xray, перезапустить сервисы
 #   bash install.sh code        — показать код подключения этого сервера
+#   bash install.sh rucdn       — вход через российский CDN (Yandex Cloud CDN и др.) на этом сервере
+#   bash install.sh rucdn off   — убрать вход через российский CDN
 #   bash install.sh reinstall   — удалить всё и поставить заново (с резервной копией)
 #   bash install.sh uninstall   — полностью удалить xvpn и Xray (с резервной копией)
 #
@@ -117,8 +119,8 @@ EOF
 [[ "$MODE" == info ]] && MODE=code
 [[ "$MODE" == panel ]] && { MODE=server; BOT=yes; }
 [[ "$MODE" == remove ]] && MODE=uninstall
-[[ "$MODE" =~ ^(server|node|bridge|update|code|reinstall|uninstall)$ ]] \
-  || die "Использование: bash install.sh [server|panel|node|bridge|update|code|reinstall|uninstall]"
+[[ "$MODE" =~ ^(server|node|bridge|update|code|reinstall|uninstall|rucdn)$ ]] \
+  || die "Использование: bash install.sh [server|panel|node|bridge|update|code|rucdn|reinstall|uninstall]"
 
 # ---------------------------------------------------------------- сеть
 
@@ -397,12 +399,16 @@ EOF
   [[ "$AGENT_MODE" == tls ]] && agent_tls_cert
   local warp=null
   if [[ "$SERVER_IP" == *:* ]]; then setup_warp; warp=$(warp_json); fi
+  local rucdn=null  # вход через российский CDN: клиенты → CDN_HOST (CDN) → ORIGIN_HOST (этот сервер)
+  if [[ -n "${CDN_HOST:-}" && -n "${ORIGIN_HOST:-}" ]]; then
+    rucdn=$(jq -nc --arg h "$CDN_HOST" --arg o "$ORIGIN_HOST" '{host:$h, origin:$o}')
+  fi
 
   mkdir -p "$ROOT/agent"
   jq -n --arg d "$DOMAIN" --arg ip "$SERVER_IP" --arg xp "$XHTTP_PATH" --arg s "$AGENT_SECRET" \
         --arg pk "$REALITY_PRIV" --arg pub "$REALITY_PUB" --arg sid "$SHORT_ID" \
-        --arg st "$SNI_TCP" --arg sx "$SNI_XHTTP" --arg rxp "$RXHTTP_PATH" --argjson w "$warp" --arg nm "$NODE_NAME" \
-    '{role:"exit", name:$nm, domain:$d, ip:$ip, xhttp_path:$xp, agent_secret:$s, warp:$w,
+        --arg st "$SNI_TCP" --arg sx "$SNI_XHTTP" --arg rxp "$RXHTTP_PATH" --argjson w "$warp" --arg nm "$NODE_NAME" --argjson rc "$rucdn" \
+    '{role:"exit", name:$nm, domain:$d, ip:$ip, xhttp_path:$xp, agent_secret:$s, warp:$w, ru_cdn:$rc,
       reality:{private_key:$pk, public_key:$pub, short_id:$sid, sni_tcp:$st, sni_xhttp:$sx, xhttp_path:$rxp}}' \
     >"$ROOT/agent/node.json"
   chmod 600 "$ROOT/agent/node.json"
@@ -488,8 +494,12 @@ write_nginx() {
   mkdir -p /etc/nginx/stream.d
   local v6listen=""  # слушать IPv6, только если он включён в системе
   [[ -s /proc/net/if_inet6 ]] && v6listen=$'\n    listen [::]:443;'
-  local dom_line=""
+  local dom_line="" origin_cert=""
   [[ -n "$DOMAIN" ]] && dom_line="    $DOMAIN    127.0.0.1:8443;"
+  if [[ -n "${ORIGIN_HOST:-}" && -s "/etc/letsencrypt/live/$ORIGIN_HOST/fullchain.pem" ]]; then
+    origin_cert="/etc/letsencrypt/live/$ORIGIN_HOST"
+    dom_line+=$'\n'"    $ORIGIN_HOST    127.0.0.1:8443;"
+  fi
   # 443 делится по SNI: домен → nginx (Cloudflare/XHTTP/панель), SNI Reality → Xray
   cat >/etc/nginx/stream.d/xvpn.conf <<EOF
 map \$ssl_preread_server_name \$xvpn_up {
@@ -509,7 +519,7 @@ EOF
     printf '\nstream {\n    include /etc/nginx/stream.d/*.conf;\n}\n' >>/etc/nginx/nginx.conf
   rm -f /etc/nginx/sites-enabled/default
 
-  if [[ -z "$DOMAIN" ]]; then
+  if [[ -z "$DOMAIN" && -z "${ORIGIN_HOST:-}" ]]; then
     rm -f /etc/nginx/sites-enabled/xvpn.conf /etc/nginx/sites-available/xvpn.conf
   else
     local panel_locs=""
@@ -531,13 +541,11 @@ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto https;
 proxy_read_timeout 60s;
 EOF
-    mkdir -p /var/www/xvpn
-    cat >/etc/nginx/sites-available/xvpn.conf <<EOF
-server {
-    listen 80;$( [[ -n "$v6listen" ]] && printf '\n    listen [::]:80;' )
-    server_name _;
-    return 301 https://\$host\$request_uri;
-}
+    mkdir -p /var/www/xvpn /var/www/xvpn-acme
+    local dom_block="" origin_block=""
+    if [[ -n "$DOMAIN" ]]; then
+      dom_block=$(cat <<EOF
+
 server {
     listen 127.0.0.1:8443 ssl http2;
     server_name $DOMAIN;
@@ -561,6 +569,48 @@ server {
     }$agent_loc$panel_locs
     location / { try_files \$uri /index.html; }
 }
+EOF
+)
+    fi
+    # источник для российского CDN: тот же XHTTP, сертификат Let's Encrypt; CDN ходит по HTTP/1.1
+    if [[ -n "$origin_cert" ]]; then
+      origin_block=$(cat <<EOF
+
+server {
+    listen 127.0.0.1:8443 ssl http2;
+    server_name $ORIGIN_HOST;
+    ssl_certificate     $origin_cert/fullchain.pem;
+    ssl_certificate_key $origin_cert/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /var/www/xvpn;
+    server_tokens off;
+
+    location $XHTTP_PATH/ {
+        client_max_body_size 0;
+        client_body_timeout 1h;
+        proxy_pass http://unix:/dev/shm/xvpn-xhttp.sock;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_set_header Host \$host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+    location / { try_files \$uri /index.html; }
+}
+EOF
+)
+    fi
+    local v6_80=""
+    [[ -n "$v6listen" ]] && v6_80=$'\n    listen [::]:80;'
+    cat >/etc/nginx/sites-available/xvpn.conf <<EOF
+server {
+    listen 80;$v6_80
+    server_name _;
+    location /.well-known/acme-challenge/ { root /var/www/xvpn-acme; }
+    location / { return 301 https://\$host\$request_uri; }
+}$dom_block$origin_block
 EOF
     ln -sf /etc/nginx/sites-available/xvpn.conf /etc/nginx/sites-enabled/xvpn.conf
     [[ -f /var/www/xvpn/index.html ]] || cat >/var/www/xvpn/index.html <<'EOF'
@@ -633,7 +683,7 @@ open_firewall() {
   c "ufw включён — открываю порты…"
   ufw allow 22/tcp >/dev/null  # не потерять SSH
   ufw allow 443/tcp >/dev/null
-  [[ -n "${DOMAIN:-}" ]] && ufw allow 80/tcp >/dev/null
+  [[ -n "${DOMAIN:-}" || -n "${ORIGIN_HOST:-}" ]] && ufw allow 80/tcp >/dev/null
   # порт агента защищён секретом и TLS; лучше потом сузить до IP главного сервера
   [[ "${AGENT_MODE:-}" == tls ]] && ufw allow "$AGENT_PORT"/tcp >/dev/null
   ok "ufw: открыты 443$([[ -n "${DOMAIN:-}" ]] && echo ', 80')$([[ "${AGENT_MODE:-}" == tls ]] && echo ", $AGENT_PORT")"
@@ -892,6 +942,60 @@ do_update() {
   ok "Обновлено"
 }
 
+set_env() { # set_env КЛЮЧ ЗНАЧЕНИЕ — записать в node.env
+  if grep -q "^$1=" "$ETC/node.env"; then sed -i "s|^$1=.*|$1='$2'|" "$ETC/node.env"
+  else echo "$1='$2'" >>"$ETC/node.env"; fi
+}
+
+# Вход через российский CDN (Yandex Cloud CDN, VK Cloud, Selectel…):
+# клиент → CDN_HOST (адрес CDN, обычно в белых списках) → ORIGIN_HOST (этот сервер, Let's Encrypt) → Xray XHTTP.
+# Российские CDN режут POST, поэтому в ссылках packet-up с отправкой методом GET (данные в заголовках).
+do_rucdn() {
+  [[ -f "$ETC/node.env" ]] || die "Сначала установите xvpn (server или node)"
+  # shellcheck disable=SC1091
+  source "$ETC/node.env"
+  [[ "${ROLE:-exit}" == exit ]] || die "Российский CDN подключают к серверу-выходу, а не к мосту"
+  if [[ "${2:-}" == off || "${ARG2:-}" == off ]]; then
+    set_env CDN_HOST ""; set_env ORIGIN_HOST ""
+    configure_exit >/dev/null; write_nginx
+    ok "Вход через российский CDN выключен. На главном сервере: xvpn sync"
+    return
+  fi
+  echo
+  c "Нужны два имени в вашем DNS:"
+  echo "  • источник — A-запись на этот сервер ($SERVER_IP), БЕЗ проксирования Cloudflare (серое облако),"
+  echo "    например origin.$( [[ -n "$DOMAIN" ]] && echo "${DOMAIN#*.}" || echo ваш-домен )"
+  echo "  • адрес CDN для клиентов — CNAME на CDN-ресурс, тоже без проксирования, например cdn.ваш-домен"
+  ask ORIGIN_HOST "Имя источника" "${ORIGIN_HOST:-}"
+  ask CDN_HOST "Адрес CDN для клиентов" "${CDN_HOST:-}"
+  local got
+  got=$(getent ahostsv4 "$ORIGIN_HOST" | awk 'NR==1{print $1}')
+  [[ "$got" == "$SERVER_IP" ]] || die "$ORIGIN_HOST указывает на ${got:-ничто}, а должен на $SERVER_IP (A-запись, серое облако)"
+  ok "$ORIGIN_HOST → $SERVER_IP"
+  set_env ORIGIN_HOST "$ORIGIN_HOST"; set_env CDN_HOST "$CDN_HOST"
+  command -v certbot >/dev/null || { c "certbot…"; apt-get install -y -qq certbot >/dev/null; }
+  open_firewall
+  write_nginx  # порт 80 с /.well-known для проверки Let's Encrypt
+  if [[ ! -s "/etc/letsencrypt/live/$ORIGIN_HOST/fullchain.pem" ]]; then
+    c "Сертификат Let's Encrypt для $ORIGIN_HOST…"
+    certbot certonly --webroot -w /var/www/xvpn-acme -d "$ORIGIN_HOST" --non-interactive --agree-tos \
+      --register-unsafely-without-email --deploy-hook "systemctl reload nginx" \
+      || die "Let's Encrypt не выдал сертификат: проверьте, что порт 80 открыт и запись без проксирования"
+  fi
+  configure_exit >/dev/null
+  write_nginx
+  systemctl restart xvpn-agent
+  ok "Источник готов: https://$ORIGIN_HOST$XHTTP_PATH/"
+  echo
+  c "Настройки CDN-ресурса:"
+  echo "  источник: $ORIGIN_HOST, протокол HTTPS, заголовок Host: $ORIGIN_HOST"
+  echo "  доменное имя: $CDN_HOST (+ TLS-сертификат для него), кеширование ВЫКЛЮЧЕНО"
+  echo "  разрешённые методы: GET, HEAD, OPTIONS; сжатие и сегментация — выключены"
+  echo
+  echo "На главном сервере выполните «xvpn sync» — в подписках появятся ссылки «РФ-CDN»."
+  echo "Проверка источника: curl -s -o /dev/null -w '%{http_code}\n' https://$ORIGIN_HOST$XHTTP_PATH/ (ждём 404 или 400)"
+}
+
 run_mode() {
   case "$MODE" in
     server) do_server ;;
@@ -899,6 +1003,7 @@ run_mode() {
     bridge) do_bridge ;;
     update) do_update ;;
     code) show_code ;;
+    rucdn) do_rucdn "$@" ;;
     uninstall) do_uninstall 0 ;;
     reinstall)
       installed || die "xvpn не установлен — выберите установку в меню"
@@ -914,4 +1019,5 @@ run_mode() {
       run_mode ;;
   esac
 }
-run_mode
+ARG2="${2:-}"
+run_mode "$@"

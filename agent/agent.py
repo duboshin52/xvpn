@@ -172,9 +172,15 @@ def build_config(node: dict, users: list[dict], upstreams: list[dict] | None = N
             {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
         ]},
     }
-    if not node.get("domain"):
+    if not node.get("domain") and not node.get("ru_cdn"):
         # нода без домена: только Reality и XHTTP-Reality (nginx разводит их по SNI на 443)
         cfg["inbounds"] = [i for i in cfg["inbounds"] if i["tag"] != "xhttp-cdn"]
+    if node.get("ru_cdn"):
+        # российские CDN режут POST: клиенты шлют данные GET-запросами в заголовках,
+        # сервер принимает данные из заголовков, cookie и тела
+        for i in cfg["inbounds"]:
+            if i["tag"] == "xhttp-cdn":
+                i["streamSettings"]["xhttpSettings"]["uplinkDataPlacement"] = "auto"
     w = node.get("warp")
     if w:
         # IPv6-only сервер: IPv4-сайты идут через Cloudflare WARP
@@ -238,7 +244,7 @@ def info():
         return {"role": "bridge", "name": n.get("name", ""), "ip": n["ip"], "port": int(n.get("port", 443)),
                 "reality": {"public_key": r["public_key"], "short_id": r["short_id"], "sni_tcp": r["sni_tcp"]}}
     return {
-        "role": "exit", "name": n.get("name", ""),
+        "role": "exit", "name": n.get("name", ""), "ru_cdn": n.get("ru_cdn"),
         "domain": n.get("domain") or None, "ip": n["ip"], "xhttp_path": n["xhttp_path"],
         "reality": {"public_key": r["public_key"], "short_id": r["short_id"],
                     "sni_tcp": r["sni_tcp"], "sni_xhttp": r["sni_xhttp"],

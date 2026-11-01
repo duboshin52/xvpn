@@ -139,8 +139,17 @@ def server_links(srv: dict, k: dict) -> list[str]:
                 f"&sni={r['sni_tcp']}&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}"
                 f"&type=tcp&flow=xtls-rprx-vision#{tag('Каскад')}"]
     cdn = []
+    rc = info.get("ru_cdn")
+    if rc and rc.get("host"):
+        # российский CDN: packet-up, отправка GET с данными в заголовках (POST там режут)
+        extra = quote(json.dumps({"uplinkHTTPMethod": "GET", "uplinkDataPlacement": "header"},
+                                 separators=(",", ":")), safe="")
+        cdn.append(f"vless://{u}@{rc['host']}:443?encryption=none&security=tls&sni={rc['host']}"
+                   f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={rc['host']}"
+                   f"&path={quote(info['xhttp_path'], safe='')}&mode=packet-up&extra={extra}"
+                   f"#{tag('РФ-CDN')}")
     if info.get("domain") and cdn_on():
-        cdn = [f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
+        cdn += [f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
                f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={info['domain']}"
                # packet-up: каждый кусок — отдельный запрос; через Cloudflare работает и без gRPC
                # (в stream-up Cloudflare без gRPC буферизует отправку — «нет обратного трафика»)
@@ -255,6 +264,9 @@ async def sync_server(srv: dict, users: list[dict]):
             qx("UPDATE keys SET used_bytes=used_bytes+?, last_active=? WHERE id=?", (total, now, int(email[1:])))
     await agent(srv, "POST", "/sync", sync_body(srv, users), timeout=40)
     status = await agent(srv, "GET", "/status")
+    with contextlib.suppress(Exception):
+        info = await agent(srv, "GET", "/info")
+        qx("UPDATE servers SET info=? WHERE id=?", (json.dumps(info), srv["id"]))
     qx("UPDATE servers SET status=?, last_seen=? WHERE id=?", (json.dumps(status), now, srv["id"]))
 
 
