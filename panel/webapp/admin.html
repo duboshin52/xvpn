@@ -125,6 +125,29 @@ code{display:block;word-break:break-all;font:12px/1.4 ui-monospace,monospace;bac
 #qr{display:flex;justify-content:center;margin:14px 0}#qr img,#qr canvas{background:#fff;padding:10px;border-radius:16px}
 details summary{cursor:pointer;font-weight:700;color:var(--mute);margin-top:12px}
 @media (prefers-reduced-motion:reduce){.thread.on,.zz,#sheet .panel{animation:none}}
+
+/* ---------- ПК-раскладка (широкий экран) ---------- */
+@media (min-width:900px){
+  body{padding-left:196px;padding-bottom:24px}
+  main{max-width:1140px;padding:26px 28px 12px}
+  /* меню слева */
+  nav{top:0;bottom:0;left:0;right:auto;width:196px;flex-direction:column;justify-content:flex-start;gap:6px;
+      padding:22px 14px;background:var(--card);box-shadow:8px 0 24px -18px #6B4FA5}
+  nav button{flex:none;max-width:none;flex-direction:row;align-items:center;gap:12px;padding:11px 14px;font-size:14px;border-radius:14px}
+  nav::before{content:"🐾 xvpn";font:700 17px var(--display);color:var(--ink);padding:0 14px 14px;display:block}
+  /* сетки */
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 16px;align-items:start}
+  #kl{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+  .stats{gap:12px}
+  .stat{padding:14px 18px}
+  .yarn{max-width:820px;margin-left:auto;margin-right:auto}
+  /* модалка по центру вместо нижнего листа */
+  #sheet{align-items:center;backdrop-filter:blur(3px)}
+  #sheet .panel{max-width:600px}
+  #s{border-radius:26px;max-height:84vh}
+  #ears{display:none}
+  .hello h1{font-size:26px}
+}
 </style>
 </head>
 <body>
@@ -259,19 +282,21 @@ function yarnCard(b, servers){
   const exits = groupExits(b, servers);
   const alive = exits.filter(e=>e.alive);
   const best = alive.sort((a,c)=>a.best-c.best)[0];
+  const resting = servers.filter(s=>s.role==='exit' && s.enabled && !s.cascade);
   let note;
   if(!b.online) note = `<span class="tag bad"><i></i>мост не на связи</span>`;
   else if(!exits.length) note = `<span class="tag warn"><i></i>включите выходы во вкладке «Серверы»</span>`;
   else if(!alive.length) note = `<span class="tag bad"><i></i>все выходы спят — трафик за рубеж не идёт</span>`;
   else note = `<span class="tag ok"><i></i>сейчас через ${esc(best.name)}</span>${alive.length<exits.length?`<span class="tag warn"><i></i>в резерве ${exits.length-alive.length} спит</span>`:`<span class="tag pink"><i></i>резерв: ${alive.length-1}</span>`}`;
   return `<section class="yarn"><h3>Каскад</h3>${yarnSvg(b, exits)}
-    <div class="legend">${note}<span class="tag"><i></i>российские сайты — напрямую</span></div></section>`;
+    <div class="legend">${note}<span class="tag"><i></i>российские сайты — напрямую</span>${resting.length?`<span class="tag">💤 отдыхают: ${resting.map(s=>esc(s.name)).join(', ')}</span>`:''}</div></section>`;
 }
 
 /* ---------- вкладка «Котики» ---------- */
 function greet(){const h=new Date().getHours();return h<6?'Доброй ночи':h<12?'Доброе утро':h<18?'Привет':'Добрый вечер'}
 async function rStatus(){
   const o = await api('/overview');
+  const bal = o.balancer;
   const bridges = o.servers.filter(s=>s.role==='bridge');
   const allUp = o.servers.length && o.servers.every(s=>s.online&&s.status?.xray?.active);
   let h = `<header class="hello">${cat(allUp?'happy':(o.servers.length?'worried':'awake'),'#FFF6E9',58)}
@@ -282,20 +307,22 @@ async function rStatus(){
     <div class="stat"><b>${fb(o.traffic_total).replace(' ','&nbsp;')}</b><span>трафик всего</span></div></div>`;
   h += bridges.map(b=>yarnCard(b,o.servers)).join('');
   if(!bridges.length && o.servers.length && ME.is_owner) h += `<div class="card row">${cat('awake','#FFB36B',44)}<div class="grow small"><b>Каскада нет.</b> Поставьте мост на российский VPS — он работает даже при белых списках. Команда во вкладке «Серверы».</div></div>`;
-  if(o.servers.length) h += `<h2>Серверы</h2>`;
+  if(o.servers.length) h += `<h2>Серверы</h2><div class="grid2">`;
   for(const s of o.servers){
     const st=s.status, up=s.online&&st;
     h += `<article class="card srv">${cat(srvMood(s), s.role==='bridge'?'var(--ginger)':COATS[(s.id-1)%COATS.length],52)}
-      <div><div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${s.role==='bridge'?'pink':''}">${s.role==='bridge'?'мост':'выход'}</span></div>`;
+      <div><div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${s.role==='bridge'?'pink':''}">${s.role==='bridge'?'мост':'выход'}</span>${s.role!=='bridge'?`<span class="tag ${s.cascade?'ok':''}"><i></i>${s.cascade?'в каскаде':'отдыхает'}</span>`:''}</div>`;
     if(up){
       h += `<div class="mute small">${st.xray.active?`Xray работает, ключей ${st.xray.users}`:'<b style="color:var(--coral)">Xray остановлен</b>'} · аптайм ${upt(st.uptime)}</div>
         ${meter('Процессор', `${st.cpu.toFixed(0)}%`, st.cpu)}
         ${meter('Память', `${fb(st.ram.used)} из ${fb(st.ram.total)}`, pct(st.ram.used,st.ram.total))}
         ${meter('Диск', `${fb(st.disk.used)} из ${fb(st.disk.total)}`, pct(st.disk.used,st.disk.total))}
+        ${bal&&bal.served[s.id]!=null?meter('Отдано за месяц', `${fb(bal.served[s.id])} из ${fb(bal.limit_bytes)}`, pct(bal.served[s.id],bal.limit_bytes)):''}
         <div class="btns"><button class="btn soft" onclick="restart(${s.id})">Перезапустить Xray</button></div>`;
     } else h += `<div class="mute small">Спит: нет связи с агентом${s.last_seen?' с '+new Date(s.last_seen*1000).toLocaleString('ru-RU'):''}</div>`;
     h += `</div></article>`;
   }
+  if(o.servers.length) h += `</div>`;
   if(!o.servers.length) h += `<div class="card empty">${cat('sleepy','#D9D3E6',72)}<p>Добавьте первый сервер — и тут появится его кот.</p><button class="btn" onclick="go('servers')">Добавить сервер</button></div>`;
   else h += `<button class="btn soft card-bg wide" style="margin-top:4px" onclick="syncNow(this)">Синхронизировать сейчас</button>
     <div class="mute small" style="text-align:center;margin-top:8px">Обновлено в ${new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})} · само обновляется каждые 15 сек</div>`;
@@ -369,17 +396,20 @@ async function kDel(id){if(await ask('Удалить ключ насовсем?'
 /* ---------- серверы ---------- */
 async function rServers(){
   const o=await api('/overview');
+  const bal=o.balancer;
   let h = o.servers.map(s=>{
     const i=s.info||{}, r=i.reality||{}, bridge=s.role==='bridge';
     return `<article class="card srv">${cat(srvMood(s), bridge?'var(--ginger)':COATS[(s.id-1)%COATS.length],52)}<div>
      <div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${bridge?'pink':''}">${bridge?'мост':'выход'}</span></div>
      <div class="mute small">${bridge?`IP ${esc(i.ip)}, SNI ${esc(r.sni_tcp)}`:`${esc(i.domain)}, IP ${esc(i.ip)}<br>Reality: ${esc(r.sni_tcp)}, ${esc(r.sni_xhttp)}`}</div>
      <div class="mute small">${s.enabled?'Есть в подписках':'Скрыт из подписок'}</div>
+     ${bal&&bal.served[s.id]!=null?meter('Отдано за месяц', `${fb(bal.served[s.id])} из ${fb(bal.limit_bytes)}`, pct(bal.served[s.id],bal.limit_bytes)):''}
      ${ME.is_owner&&!bridge?`<label class="switch"><input type="checkbox" ${s.cascade?'checked':''} onchange="sEdit(${s.id},{cascade:this.checked?1:0})"><s></s>Выход для каскада</label>`:''}
      ${ME.is_owner?`<div class="btns"><button class="btn soft" onclick="sEdit(${s.id},{enabled:${s.enabled?0:1}})">${s.enabled?'Скрыть из подписок':'Вернуть в подписки'}</button>
       <button class="btn soft" onclick="sEdit(${s.id},{refresh_info:1})">Обновить параметры</button>
       <button class="btn soft" onclick="sRen(${s.id})">Переименовать</button>
       <button class="btn danger" onclick="sDel(${s.id})">Удалить</button></div>`:''}</div></article>`}).join('');
+  if(h) h = `<div class="grid2">${h}</div>`;
   if(!o.servers.length) h = `<div class="card empty">${cat('sleepy','#D9D3E6',72)}<p>Серверов пока нет.</p></div>`;
   if(ME.is_owner&&o.servers.some(s=>s.info&&s.info.domain)) h = `<div class="card"><label class="switch" style="margin-top:0"><input type="checkbox" ${o.cdn?'checked':''} onchange="setCdn(this.checked)"><s></s>CDN-ссылки в подписках</label>
    <div class="mute small" style="margin-top:6px">XHTTP через Cloudflare. В России Cloudflare часто замедляют, и такие ссылки не работают — тогда выключите.</div></div>` + h;

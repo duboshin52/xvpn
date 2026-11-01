@@ -253,19 +253,21 @@ function yarnCard(b, servers){
   const exits = groupExits(b, servers);
   const alive = exits.filter(e=>e.alive);
   const best = alive.sort((a,c)=>a.best-c.best)[0];
+  const resting = servers.filter(s=>s.role==='exit' && s.enabled && !s.cascade);
   let note;
   if(!b.online) note = `<span class="tag bad"><i></i>мост не на связи</span>`;
   else if(!exits.length) note = `<span class="tag warn"><i></i>включите выходы во вкладке «Серверы»</span>`;
   else if(!alive.length) note = `<span class="tag bad"><i></i>все выходы спят — трафик за рубеж не идёт</span>`;
   else note = `<span class="tag ok"><i></i>сейчас через ${esc(best.name)}</span>${alive.length<exits.length?`<span class="tag warn"><i></i>в резерве ${exits.length-alive.length} спит</span>`:`<span class="tag pink"><i></i>резерв: ${alive.length-1}</span>`}`;
   return `<section class="yarn"><h3>Каскад</h3>${yarnSvg(b, exits)}
-    <div class="legend">${note}<span class="tag"><i></i>российские сайты — напрямую</span></div></section>`;
+    <div class="legend">${note}<span class="tag"><i></i>российские сайты — напрямую</span>${resting.length?`<span class="tag">💤 отдыхают: ${resting.map(s=>esc(s.name)).join(', ')}</span>`:''}</div></section>`;
 }
 
 /* ---------- вкладка «Котики» ---------- */
 function greet(){const h=new Date().getHours();return h<6?'Доброй ночи':h<12?'Доброе утро':h<18?'Привет':'Добрый вечер'}
 async function rStatus(){
   const o = await api('/overview');
+  const bal = o.balancer;
   const bridges = o.servers.filter(s=>s.role==='bridge');
   const allUp = o.servers.length && o.servers.every(s=>s.online&&s.status?.xray?.active);
   let h = `<header class="hello">${cat(allUp?'happy':(o.servers.length?'worried':'awake'),'#FFF6E9',58)}
@@ -280,12 +282,13 @@ async function rStatus(){
   for(const s of o.servers){
     const st=s.status, up=s.online&&st;
     h += `<article class="card srv">${cat(srvMood(s), s.role==='bridge'?'var(--ginger)':COATS[(s.id-1)%COATS.length],52)}
-      <div><div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${s.role==='bridge'?'pink':''}">${s.role==='bridge'?'мост':'выход'}</span></div>`;
+      <div><div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${s.role==='bridge'?'pink':''}">${s.role==='bridge'?'мост':'выход'}</span>${s.role!=='bridge'?`<span class="tag ${s.cascade?'ok':''}"><i></i>${s.cascade?'в каскаде':'отдыхает'}</span>`:''}</div>`;
     if(up){
       h += `<div class="mute small">${st.xray.active?`Xray работает, ключей ${st.xray.users}`:'<b style="color:var(--coral)">Xray остановлен</b>'} · аптайм ${upt(st.uptime)}</div>
         ${meter('Процессор', `${st.cpu.toFixed(0)}%`, st.cpu)}
         ${meter('Память', `${fb(st.ram.used)} из ${fb(st.ram.total)}`, pct(st.ram.used,st.ram.total))}
         ${meter('Диск', `${fb(st.disk.used)} из ${fb(st.disk.total)}`, pct(st.disk.used,st.disk.total))}
+        ${bal&&bal.served[s.id]!=null?meter('Отдано за месяц', `${fb(bal.served[s.id])} из ${fb(bal.limit_bytes)}`, pct(bal.served[s.id],bal.limit_bytes)):''}
         <div class="btns"><button class="btn soft" onclick="restart(${s.id})">Перезапустить Xray</button></div>`;
     } else h += `<div class="mute small">Спит: нет связи с агентом${s.last_seen?' с '+new Date(s.last_seen*1000).toLocaleString('ru-RU'):''}</div>`;
     h += `</div></article>`;
@@ -363,12 +366,14 @@ async function kDel(id){if(await ask('Удалить ключ насовсем?'
 /* ---------- серверы ---------- */
 async function rServers(){
   const o=await api('/overview');
+  const bal=o.balancer;
   let h = o.servers.map(s=>{
     const i=s.info||{}, r=i.reality||{}, bridge=s.role==='bridge';
     return `<article class="card srv">${cat(srvMood(s), bridge?'var(--ginger)':COATS[(s.id-1)%COATS.length],52)}<div>
      <div class="row"><b class="grow">${esc(s.name)}</b><span class="tag ${bridge?'pink':''}">${bridge?'мост':'выход'}</span></div>
      <div class="mute small">${bridge?`IP ${esc(i.ip)}, SNI ${esc(r.sni_tcp)}`:`${esc(i.domain)}, IP ${esc(i.ip)}<br>Reality: ${esc(r.sni_tcp)}, ${esc(r.sni_xhttp)}`}</div>
      <div class="mute small">${s.enabled?'Есть в подписках':'Скрыт из подписок'}</div>
+     ${bal&&bal.served[s.id]!=null?meter('Отдано за месяц', `${fb(bal.served[s.id])} из ${fb(bal.limit_bytes)}`, pct(bal.served[s.id],bal.limit_bytes)):''}
      ${ME.is_owner&&!bridge?`<label class="switch"><input type="checkbox" ${s.cascade?'checked':''} onchange="sEdit(${s.id},{cascade:this.checked?1:0})"><s></s>Выход для каскада</label>`:''}
      ${ME.is_owner?`<div class="btns"><button class="btn soft" onclick="sEdit(${s.id},{enabled:${s.enabled?0:1}})">${s.enabled?'Скрыть из подписок':'Вернуть в подписки'}</button>
       <button class="btn soft" onclick="sEdit(${s.id},{refresh_info:1})">Обновить параметры</button>

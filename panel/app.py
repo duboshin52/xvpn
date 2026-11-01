@@ -538,7 +538,26 @@ def api_overview(u=Depends(tg_user)):
     states = [key_state(k) for k in keys]
     return {"servers": servers, "cdn": cdn_on(), "keys_total": len(keys), "keys_active": states.count("active"),
             "keys_online": sum(k["last_active"] > time.time() - 180 for k in keys),
-            "traffic_total": sum(k["used_bytes"] for k in keys)}
+            "traffic_total": sum(k["used_bytes"] for k in keys),
+            "balancer": balancer_info()}
+
+
+def balancer_info():
+    """Состояние балансировщика (если установлен): лимит и сколько отдал каждый выход."""
+    try:
+        st = json.load(open("/etc/xvpn/balancer.json", encoding="utf-8"))
+        limit_gb = 200.0
+        try:
+            for line in open("/etc/xvpn/balancer.env", encoding="utf-8"):
+                if line.startswith("LIMIT_GB="):
+                    limit_gb = float(line.split("=", 1)[1].strip().strip("'\""))
+        except FileNotFoundError:
+            pass
+        return {"limit_bytes": int(limit_gb * 1024**3),
+                "served": {int(k): v for k, v in (st.get("served") or {}).items()},
+                "ts": st.get("ts", 0)}
+    except FileNotFoundError:
+        return None
 
 
 @app.get(P + "/api/keys")
