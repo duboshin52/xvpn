@@ -40,6 +40,8 @@ ${B}Этот сервер${N}
   xvpn status                     состояние сервисов (и сводка на главном)
   xvpn code                       код подключения этого сервера к главному
   xvpn update                     обновить xvpn и Xray
+  xvpn reinstall                  удалить и поставить заново начисто (с резервной копией)
+  xvpn uninstall                  полностью удалить xvpn и Xray (с резервной копией)
 EOF
 }
 
@@ -217,6 +219,9 @@ case "$cmd" in
   sync) need_main; api POST /sync >/dev/null; ok "Синхронизировано" ;;
   status) cmd_status ;;
   code|info) inst=$(src_install); [[ -n "$inst" ]] || die "Нет /opt/xvpn/src — выполните xvpn update"; bash "$inst" code ;;
+  uninstall|remove|reinstall)
+    inst=$(src_install); [[ -n "$inst" ]] || die "Нет /opt/xvpn/src — выполните xvpn update"
+    exec bash "$inst" "$cmd" ;;
   update)
     exec bash <(curl -fsSL "https://raw.githubusercontent.com/${XVPN_REPO:-duboshin52/xvpn}/${XVPN_BRANCH:-main}/install.sh") update ;;
   *) usage; exit 1 ;;

@@ -8,6 +8,11 @@
 #   bash install.sh bridge      — мост каскада на российском VPS (подключается к главному кодом)
 #   bash install.sh update      — обновить код и Xray, перезапустить сервисы
 #   bash install.sh code        — показать код подключения этого сервера
+#   bash install.sh reinstall   — удалить всё и поставить заново (с резервной копией)
+#   bash install.sh uninstall   — полностью удалить xvpn и Xray (с резервной копией)
+#
+# Если xvpn уже установлен, установщик спросит: обновить с сохранением ключей или поставить начисто.
+# Без вопросов: REINSTALL=update | clean | no; для uninstall — YES=1.
 #
 # Ответы можно задать переменными: DOMAIN (пусто = без домена), CF_API_TOKEN, BOT=yes|no, BOT_TOKEN,
 # OWNER_ID, SNI_TCP, SNI_XHTTP, NODE_NAME, AGENT_PORT, SUB_TITLE, CERT_FILE, KEY_FILE.
@@ -87,8 +92,10 @@ menu() {
        Для резерва входа поставьте два моста — оба попадут в подписку.
 
   Обслуживание
-    5) Обновить xvpn и Xray
+    5) Обновить xvpn и Xray (ключи и настройки сохранятся)
     6) Показать код подключения этого сервера
+    7) Переустановить начисто
+    8) Удалить xvpn с сервера
 
 EOF
   local n
@@ -100,6 +107,8 @@ EOF
     4) MODE=bridge ;;
     5) MODE=update ;;
     6) MODE=code ;;
+    7) MODE=reinstall ;;
+    8) MODE=uninstall ;;
     *) die "Нет такого пункта" ;;
   esac
 }
@@ -107,7 +116,9 @@ EOF
 [[ "$MODE" == standalone ]] && MODE=server
 [[ "$MODE" == info ]] && MODE=code
 [[ "$MODE" == panel ]] && { MODE=server; BOT=yes; }
-[[ "$MODE" =~ ^(server|node|bridge|update|code)$ ]] || die "Использование: bash install.sh [server|panel|node|bridge|update|code]"
+[[ "$MODE" == remove ]] && MODE=uninstall
+[[ "$MODE" =~ ^(server|node|bridge|update|code|reinstall|uninstall)$ ]] \
+  || die "Использование: bash install.sh [server|panel|node|bridge|update|code|reinstall|uninstall]"
 
 # ---------------------------------------------------------------- сеть
 
@@ -650,12 +661,115 @@ show_code() {
   fi
 }
 
+# ---------------------------------------------------------------- существующая установка
+
+installed() {
+  [[ -d "$ETC" || -d /etc/xvpn-cascade || -f /etc/systemd/system/xvpn-agent.service \
+     || -f /etc/systemd/system/xvpn-panel.service || -f /usr/local/bin/xvpn ]]
+}
+
+current_role() { # main | exit | bridge | cascade-old | broken
+  if [[ -f "$ETC/panel.env" ]]; then echo main
+  elif [[ -f "$ETC/node.env" ]] && grep -q "^ROLE='bridge'" "$ETC/node.env"; then echo bridge
+  elif [[ -f "$ETC/node.env" ]]; then echo exit
+  elif [[ -d /etc/xvpn-cascade ]]; then echo cascade-old
+  else echo broken; fi
+}
+role_name() {
+  case "$1" in
+    main) echo "главный сервер" ;; exit) echo "сервер-выход" ;; bridge) echo "мост (РФ)" ;;
+    cascade-old) echo "старый cascade.sh" ;; *) echo "незавершённая установка" ;;
+  esac
+}
+
+backup() {
+  local f files=()
+  for f in etc/xvpn etc/xvpn-cascade opt/xvpn/panel/xvpn.db; do [[ -e "/$f" ]] && files+=("$f"); done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  f="/root/xvpn-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+  tar czf "$f" -C / "${files[@]}" 2>/dev/null && chmod 600 "$f" && ok "Резервная копия: $f"
+}
+
+# Полное удаление. keep_src=1 — сохранить исходники для установки сразу после удаления
+do_uninstall() {
+  local keep_src=${1:-0}
+  if ! installed; then warn "xvpn на этом сервере не найден."; return 0; fi
+  if [[ $keep_src == 0 && "${YES:-}" != 1 ]]; then
+    local yn
+    warn "Будут удалены xvpn, Xray, ключи и настройки этого сервера ($(role_name "$(current_role)"))."
+    read -rp "Удалить? Резервная копия сохранится в /root [д/Н]: " yn </dev/tty
+    [[ "$yn" =~ ^[YyДд] ]] || die "Отменено"
+  fi
+  backup
+  c "Удаляю xvpn…"
+  local u
+  for u in xvpn-panel xvpn-agent xray; do systemctl disable --now "$u" >/dev/null 2>&1 || true; done
+  rm -rf /etc/systemd/system/xvpn-panel.service /etc/systemd/system/xvpn-agent.service \
+         /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
+         /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d
+  systemctl daemon-reload
+  rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/share/xray /var/log/xray /usr/local/bin/wgcf
+  # nginx: убираем только своё
+  rm -f /etc/nginx/stream.d/xvpn.conf /etc/nginx/sites-enabled/xvpn.conf /etc/nginx/sites-available/xvpn.conf \
+        /etc/nginx/xvpn_proxy.conf
+  rm -rf /var/www/xvpn
+  if command -v nginx >/dev/null; then
+    if [[ -e /etc/nginx/sites-available/default && ! -e /etc/nginx/sites-enabled/default ]]; then
+      ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+    fi
+    if nginx -t >/dev/null 2>&1; then systemctl reload nginx >/dev/null 2>&1 || true
+    else systemctl stop nginx >/dev/null 2>&1 || true; fi
+  fi
+  rm -f /etc/sysctl.d/99-xvpn.conf /etc/sysctl.d/99-xvpn-cascade.conf
+  sysctl --system >/dev/null 2>&1 || true
+  rm -f /usr/local/bin/xvpn /usr/local/bin/xvpn-cascade
+  rm -rf "$ETC" /etc/xvpn-cascade
+  if [[ $keep_src == 1 && "$SRC" == "$ROOT"/* ]]; then  # исходники нужны для установки после удаления
+    local tmp; tmp=$(mktemp -d /tmp/xvpn-src.XXXX)
+    cp -r "$SRC"/. "$tmp/"; SRC=$tmp
+  fi
+  rm -rf "$ROOT"
+  ok "xvpn удалён"
+}
+
+# Перед установкой: если xvpn уже стоит — обновить, переустановить начисто или отменить
+check_existing() { # целевая роль: main | exit | bridge
+  installed || return 0
+  local want=$1 cur choice
+  cur=$(current_role)
+  echo
+  warn "На сервере уже установлен xvpn: $(role_name "$cur")."
+  case "${REINSTALL:-}" in
+    update) choice=1 ;; clean|yes) choice=2 ;; no) die "Отменено (REINSTALL=no)" ;;
+    *)
+      if [[ "$cur" == "$want" ]]; then
+        echo "  1) Обновить — ключи, настройки и подключения сохранятся"
+        echo "  2) Переустановить начисто — всё удалить и поставить заново"
+        echo "  3) Отмена"
+        read -rp "Номер [1]: " choice </dev/tty; choice=${choice:-1}
+      else
+        echo "  Вы ставите: $(role_name "$want")."
+        echo "  2) Удалить текущую установку и поставить заново"
+        echo "  3) Отмена"
+        read -rp "Номер [3]: " choice </dev/tty; choice=${choice:-3}
+        [[ "$choice" == 1 ]] && choice=3
+      fi ;;
+  esac
+  case "$choice" in
+    1) [[ "$cur" == "$want" ]] || die "Обновление возможно только в той же роли"; do_update; exit 0 ;;
+    2) do_uninstall 1
+       if [[ "$cur" == exit || "$cur" == bridge ]]; then
+         warn "Код подключения изменится. На главном сервере уберите старую запись (xvpn server del ИМЯ)"
+         warn "и добавьте новый код, который покажет установщик."
+       fi ;;
+    *) die "Отменено" ;;
+  esac
+}
+
 # ---------------------------------------------------------------- сценарии
 
 do_server() {
-  [[ -f "$ETC/node.env" ]] && grep -q "^ROLE='bridge'" "$ETC/node.env" && die "Здесь стоит мост — главный сервер ставьте на другой VPS"
-  [[ -f "$ETC/node.env" ]] && ! [[ -f "$ETC/panel.env" ]] && grep -q "^AGENT_MODE='\(nginx\|tls\)'" "$ETC/node.env" \
-    && die "Здесь стоит дополнительный сервер-выход. Главный сервер ставьте на чистый VPS."
+  check_existing main
   dns64_on
   install_packages
   install_xray
@@ -692,8 +806,7 @@ do_server() {
 }
 
 do_node() {
-  [[ -f "$ETC/panel.env" ]] && die "Здесь стоит главный сервер"
-  [[ -f "$ETC/node.env" ]] && grep -q "^ROLE='bridge'" "$ETC/node.env" && die "Здесь стоит мост"
+  check_existing exit
   dns64_on
   install_packages
   install_xray
@@ -714,9 +827,7 @@ do_node() {
 }
 
 do_bridge() {
-  if [[ -f "$ETC/node.env" ]] && ! grep -q "^ROLE='bridge'" "$ETC/node.env"; then
-    die "На этом сервере уже стоит xvpn в другой роли"
-  fi
+  check_existing bridge
   install_packages
   install_xray
   enable_bbr
@@ -761,10 +872,26 @@ do_update() {
   ok "Обновлено"
 }
 
-case "$MODE" in
-  server) do_server ;;
-  node) do_node ;;
-  bridge) do_bridge ;;
-  update) do_update ;;
-  code) show_code ;;
-esac
+run_mode() {
+  case "$MODE" in
+    server) do_server ;;
+    node) do_node ;;
+    bridge) do_bridge ;;
+    update) do_update ;;
+    code) show_code ;;
+    uninstall) do_uninstall 0 ;;
+    reinstall)
+      installed || die "xvpn не установлен — выберите установку в меню"
+      local was; was=$(current_role)
+      if [[ "${YES:-}" != 1 ]]; then
+        local yn
+        warn "Будут удалены ключи и настройки ($(role_name "$was")). Резервная копия сохранится в /root."
+        read -rp "Переустановить начисто? [д/Н]: " yn </dev/tty
+        [[ "$yn" =~ ^[YyДд] ]] || die "Отменено"
+      fi
+      do_uninstall 1
+      case "$was" in main) MODE=server ;; exit) MODE=node ;; bridge) MODE=bridge ;; *) menu ;; esac
+      run_mode ;;
+  esac
+}
+run_mode
