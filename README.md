@@ -159,6 +159,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install
 
 Настройки: `/etc/xvpn/balancer.env`. Лог: `journalctl -u xvpn-balancer`. Отключить: `systemctl disable --now xvpn-balancer.timer`.
 
+### 8. Резервное копирование
+
+На главном сервере бэкап ставится автоматически (при установке и обновлении): таймер `xvpn-backup.timer`
+ежедневно в 04:17 складывает в `/root/xvpn-backups/` архив с базой ключей `xvpn.db` (согласованная копия
+через sqlite backup API), настройками `/etc/xvpn/` и `node.json` этой ноды. Хранятся последние 14 архивов.
+
+Настройки: `/etc/xvpn/backup.env` — `KEEP` (сколько архивов хранить, 0 — все) и `SEND_TG=1`
+(архив дополнительно приходит Telegram-админам ботом). Вручную: `python3 /opt/xvpn/backup/backup.py`.
+При удалении xvpn архивы в `/root/xvpn-backups/` сохраняются.
+
+Живость нод проверяется каждую минуту синхронизацией панели: недоступный сервер сам пропадает
+из подписок (пользователям не приезжают мёртвые ссылки) и возвращается, когда оживает.
+
 ## Команда xvpn
 
 | | |
@@ -210,6 +223,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install
 
 ## Где что лежит
 
-- `/etc/xvpn/`: настройки и секреты (`node.env`, `panel.env`), сертификаты.
-- `/opt/xvpn/agent/`: агент сервера. `/opt/xvpn/panel/`: главный сервер и база `xvpn.db`, которую стоит бэкапить.
+- `/etc/xvpn/`: настройки и секреты (`node.env`, `panel.env`, `backup.env`), сертификаты.
+- `/opt/xvpn/agent/`: агент сервера. `/opt/xvpn/panel/`: главный сервер и база `xvpn.db` (бэкапится автоматически, см. выше).
+- `/opt/xvpn/backup/`: скрипт ежедневного бэкапа; архивы — в `/root/xvpn-backups/`.
 - Сервисы: `xray`, `xvpn-agent`, `xvpn-panel` (только на главном), `nginx`. Логи: `journalctl -u xvpn-panel -f`.

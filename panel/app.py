@@ -168,8 +168,9 @@ def server_links(srv: dict, k: dict) -> list[str]:
 
 def key_links(k: dict) -> list[str]:
     out = []
-    # мосты (каскад) первыми: они работают и при белых списках
-    for s in q("SELECT * FROM servers WHERE enabled=1 ORDER BY role='bridge' DESC, id"):
+    # мосты (каскад) первыми: они работают и при белых списках;
+    # недоступные ноды (online=0 по итогам sync) из подписок убираем
+    for s in q("SELECT * FROM servers WHERE enabled=1 AND online=1 ORDER BY role='bridge' DESC, id"):
         out += server_links(s, k)
     return out
 

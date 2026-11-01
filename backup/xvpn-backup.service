@@ -1,0 +1,7 @@
+[Unit]
+Description=xvpn daily backup of keys database and settings
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/xvpn/backup.env
+ExecStart=/usr/bin/python3 /opt/xvpn/backup/backup.py

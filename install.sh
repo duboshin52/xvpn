@@ -775,8 +775,10 @@ do_uninstall() {
   backup
   c "Удаляю xvpn…"
   local u
-  for u in xvpn-panel xvpn-agent xray; do systemctl disable --now "$u" >/dev/null 2>&1 || true; done
+  for u in xvpn-panel xvpn-agent xray xvpn-backup.timer xvpn-balancer.timer; do systemctl disable --now "$u" >/dev/null 2>&1 || true; done
   rm -rf /etc/systemd/system/xvpn-panel.service /etc/systemd/system/xvpn-agent.service \
+         /etc/systemd/system/xvpn-backup.service /etc/systemd/system/xvpn-backup.timer \
+         /etc/systemd/system/xvpn-balancer.service /etc/systemd/system/xvpn-balancer.timer \
          /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
          /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d
   systemctl daemon-reload
@@ -856,6 +858,7 @@ do_server() {
   bootstrap_xray
   write_panel_service
   write_nginx
+  install_backup
   open_firewall
   dns64_off
   systemctl daemon-reload
@@ -945,7 +948,8 @@ do_update() {
   systemctl daemon-reload
   systemctl restart xray xvpn-agent
   [[ -f "$ETC/panel.env" ]] && systemctl restart xvpn-panel
-  # дополнительные компоненты, если установлены
+  # дополнительные компоненты: бэкап ставим всем, у кого есть панель; балансировщик — если был
+  install_backup
   [[ -f /etc/systemd/system/xvpn-balancer.timer ]] && install_balancer
   if [[ -f /etc/xvpn/webadmin.env ]]; then
     cp "$SRC/panel/webapp/admin.html" /opt/xvpn-webadmin/index.html 2>/dev/null || true
@@ -975,6 +979,23 @@ install_balancer() {
   source "$ETC/balancer.env"
   ok "Балансировщик включён: ротация каждые ${LIMIT_GB:-200} ГБ, активных выходов ${PAIR:-2}, сброс счётчиков ${RESET_DAY:-1}-го числа"
   echo "  Настройки: $ETC/balancer.env · лог: journalctl -u xvpn-balancer"
+}
+
+# ---------------------------------------------------------------- резервное копирование
+
+install_backup() {
+  [[ -f "$ETC/panel.env" ]] || return 0  # бэкап нужен на главном сервере (там база ключей)
+  c "Резервное копирование базы ключей…"
+  mkdir -p "$ROOT/backup"
+  cp "$SRC/backup/backup.py" "$ROOT/backup/"
+  cp "$SRC/backup/xvpn-backup.service" "$SRC/backup/xvpn-backup.timer" /etc/systemd/system/
+  if [[ ! -f "$ETC/backup.env" ]]; then
+    cp "$SRC/backup/backup.env.example" "$ETC/backup.env"
+    chmod 600 "$ETC/backup.env"
+  fi
+  systemctl daemon-reload
+  systemctl enable --now xvpn-backup.timer >/dev/null 2>&1
+  ok "Бэкапы: ежедневно в /root/xvpn-backups (настройки: $ETC/backup.env)"
 }
 
 # ---------------------------------------------------------------- веб-панель
