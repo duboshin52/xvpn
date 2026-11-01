@@ -127,7 +127,9 @@ def server_links(srv: dict, k: dict) -> list[str]:
     if info.get("domain"):
         cdn = [f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
                f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={info['domain']}"
-               f"&path={quote(info['xhttp_path'], safe='')}&mode=auto#{tag('XHTTP-CDN')}"]
+               # packet-up: каждый кусок — отдельный запрос; через Cloudflare работает и без gRPC
+               # (в stream-up Cloudflare без gRPC буферизует отправку — «нет обратного трафика»)
+               f"&path={quote(info['xhttp_path'], safe='')}&mode=packet-up#{tag('XHTTP-CDN')}"]
     return cdn + [
         f"vless://{u}@{h}:443?encryption=none&security=reality&sni={r['sni_tcp']}"
         f"&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}&type=tcp&flow=xtls-rprx-vision"
