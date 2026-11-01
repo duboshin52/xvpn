@@ -11,13 +11,15 @@
 Роли ноды (node.json → role):
   exit   - обычная нода: XHTTP через Cloudflare + Reality + XHTTP-Reality, трафик выходит в интернет
   bridge - мост каскада (РФ): VLESS+Reality+Vision для клиентов, российские сайты напрямую,
-           остальное через выходы (несколько — балансировка leastPing с проверкой каждые 30 с)
+           остальное через выходы (несколько — пользователи закреплены за выходами по номеру
+           ключа, внутри выхода leastPing, при падении — перекрёстный резерв; проверка каждые 30 с)
 """
 import urllib.request
 import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -74,17 +76,36 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
     r = node["reality"]
     vision = [{"id": u["uuid"], "email": u["email"], "flow": "xtls-rprx-vision"} for u in users]
     exits = []
+    by_srv: dict[str, list[str]] = {}  # теги exit-<id>-x|t, сгруппированные по серверу
     for u in upstreams:
         o = json.loads(json.dumps(u["outbound"]))
         o["tag"] = u["tag"]
         exits.append(o)
+        sid = u["tag"].split("-")[1] if u["tag"].count("-") >= 2 else u["tag"]
+        by_srv.setdefault(sid, []).append(u["tag"])
+    srv_ids = sorted(by_srv, key=lambda s: int(s) if s.isdigit() else 0)
+    nsrv = len(srv_ids)
     last = {"type": "field", "network": "tcp,udp"}
-    if len(exits) > 1:
-        last["balancerTag"] = "exits"
-    elif exits:
-        last["outboundTag"] = exits[0]["tag"]
-    else:
+    if not exits:
         last["outboundTag"] = "block"  # выходов нет — за рубеж не пускаем, РФ-сайты работают
+    elif nsrv == 1:
+        if len(exits) > 1:
+            last["balancerTag"] = "exits"
+        else:
+            last["outboundTag"] = exits[0]["tag"]
+    else:
+        last["balancerTag"] = f"exits-{srv_ids[0]}"
+    # распределение пользователей по выходам: каждый ключ закреплён за своим
+    # сервером (по номеру ключа), при падении сервера группа уходит на соседний
+    user_rules = []
+    if nsrv > 1:
+        groups: list[list[str]] = [[] for _ in srv_ids]
+        for u in users:
+            m = re.search(r"\d+", u.get("email") or "")
+            groups[int(m.group()) % nsrv if m else 0].append(u["email"])
+        for i, sid in enumerate(srv_ids):
+            if groups[i]:
+                user_rules.append({"type": "field", "user": groups[i], "balancerTag": f"exits-{sid}"})
     cfg = _common(node) | {
         "inbounds": [
             {"tag": "api", "listen": "127.0.0.1", "port": 10085,
@@ -106,6 +127,7 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
             {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
             {"type": "field", "domain": RU_DOMAINS, "outboundTag": "direct"},
             {"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"},
+            *user_rules,
             last,
         ]},
     }
@@ -113,7 +135,14 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
         cfg["metrics"] = {"tag": "metrics", "listen": METRICS_ADDR}
         cfg["observatory"] = {"subjectSelector": ["exit-"], "probeURL": PROBE_URL,
                               "probeInterval": "30s", "enableConcurrency": True}
-    if len(exits) > 1:
+    if nsrv > 1:
+        # по балансировщику на сервер + перекрёстный резерв по кольцу
+        cfg["routing"]["balancers"] = [
+            {"tag": f"exits-{sid}", "selector": [f"exit-{sid}-"],
+             "strategy": {"type": "leastPing"},
+             "fallbackTag": by_srv[srv_ids[(i + 1) % nsrv]][0]}
+            for i, sid in enumerate(srv_ids)]
+    elif len(exits) > 1:
         cfg["routing"]["balancers"] = [{"tag": "exits", "selector": ["exit-"],
                                         "strategy": {"type": "leastPing"},
                                         "fallbackTag": exits[0]["tag"]}]
