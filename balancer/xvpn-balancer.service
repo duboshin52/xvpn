@@ -1,0 +1,8 @@
+[Unit]
+Description=xvpn cascade balancer (rotation by traffic)
+After=xvpn-panel.service
+Requires=xvpn-panel.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/xvpn/balancer/balancer.py
