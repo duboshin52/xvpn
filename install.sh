@@ -625,6 +625,20 @@ bootstrap_xray() {
   systemctl restart xray
 }
 
+# Если включён ufw — открыть нужные порты (иначе 443 закрыт и Cloudflare отдаёт 522)
+open_firewall() {
+  command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active' || return 0
+  # shellcheck disable=SC1091
+  source "$ETC/node.env"
+  c "ufw включён — открываю порты…"
+  ufw allow 22/tcp >/dev/null  # не потерять SSH
+  ufw allow 443/tcp >/dev/null
+  [[ -n "${DOMAIN:-}" ]] && ufw allow 80/tcp >/dev/null
+  # порт агента защищён секретом и TLS; лучше потом сузить до IP главного сервера
+  [[ "${AGENT_MODE:-}" == tls ]] && ufw allow "$AGENT_PORT"/tcp >/dev/null
+  ok "ufw: открыты 443$([[ -n "${DOMAIN:-}" ]] && echo ', 80')$([[ "${AGENT_MODE:-}" == tls ]] && echo ", $AGENT_PORT")"
+}
+
 # ---------------------------------------------------------------- код подключения
 
 connection_code() {
@@ -786,6 +800,7 @@ do_server() {
   bootstrap_xray
   write_panel_service
   write_nginx
+  open_firewall
   dns64_off
   systemctl daemon-reload
   systemctl enable --now xvpn-agent >/dev/null 2>&1; systemctl restart xvpn-agent
@@ -820,6 +835,7 @@ do_node() {
   write_agent_service
   bootstrap_xray
   write_nginx
+  open_firewall
   dns64_off
   systemctl daemon-reload
   systemctl enable --now xvpn-agent >/dev/null 2>&1; systemctl restart xvpn-agent
@@ -839,6 +855,7 @@ do_bridge() {
   setup_venv "$ROOT/agent" "${AGENT_DEPS[@]}"
   write_agent_service
   bootstrap_xray
+  open_firewall
   systemctl daemon-reload
   systemctl enable --now xvpn-agent >/dev/null 2>&1; systemctl restart xvpn-agent
   ok "Мост готов. Выходы и ключи он получит от главного сервера после подключения."
@@ -867,6 +884,7 @@ do_update() {
   [[ -f "$ETC/panel.env" ]] && { setup_venv "$ROOT/panel" "${PANEL_DEPS[@]}"; write_panel_service; }
   write_agent_service
   [[ "$ROLE" == bridge ]] || write_nginx
+  open_firewall
   dns64_off
   systemctl daemon-reload
   systemctl restart xray xvpn-agent
