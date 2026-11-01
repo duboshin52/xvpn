@@ -947,7 +947,12 @@ do_update() {
   [[ -f "$ETC/panel.env" ]] && systemctl restart xvpn-panel
   # дополнительные компоненты, если установлены
   [[ -f /etc/systemd/system/xvpn-balancer.timer ]] && install_balancer
-  [[ -f /etc/xvpn/webadmin.env ]] && cp "$SRC/panel/webapp/admin.html" /opt/xvpn-webadmin/index.html 2>/dev/null || true
+  if [[ -f /etc/xvpn/webadmin.env ]]; then
+    cp "$SRC/panel/webapp/admin.html" /opt/xvpn-webadmin/index.html 2>/dev/null || true
+    cp "$SRC/panel/webadmin-passwd.py" /opt/xvpn-webadmin/passwd.py 2>/dev/null || true
+    cp "$SRC/panel/xvpn-webadmin-passwd.service" /etc/systemd/system/ 2>/dev/null || true
+    systemctl daemon-reload; systemctl enable --now xvpn-webadmin-passwd >/dev/null 2>&1 || true
+  fi
   ok "Обновлено"
 }
 
@@ -1002,6 +1007,9 @@ install_webadmin() {
 
   mkdir -p /opt/xvpn-webadmin /etc/xvpn-webadmin
   cp "$SRC/panel/webapp/admin.html" /opt/xvpn-webadmin/index.html
+  cp "$SRC/panel/webadmin-passwd.py" /opt/xvpn-webadmin/passwd.py
+  cp "$SRC/panel/xvpn-webadmin-passwd.service" /etc/systemd/system/
+  systemctl daemon-reload; systemctl enable --now xvpn-webadmin-passwd >/dev/null 2>&1
   [[ -s /etc/xvpn-webadmin/cert.pem ]] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -nodes -days 3650 -keyout /etc/xvpn-webadmin/key.pem -out /etc/xvpn-webadmin/cert.pem \
     -subj "/CN=xvpn-panel" 2>/dev/null
@@ -1082,6 +1090,17 @@ server {
         proxy_set_header X-CLI-Token "$ct";
         proxy_set_header X-Init-Data "";
         proxy_read_timeout 30s;
+    }
+
+    # смена пароля панели (локальный сервис, тоже за Basic Auth)
+    location = /$wa_path/passwd {
+        limit_req zone=wa burst=4 nodelay;
+        auth_basic "restricted";
+        auth_basic_user_file /etc/xvpn-webadmin/.htpasswd;
+        proxy_pass http://127.0.0.1:9444/;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1;
+        proxy_read_timeout 15s;
     }
 }
 EOF

@@ -439,7 +439,26 @@ async function rAdmins(){
    <label for="ai">Telegram ID</label><input id="ai" type="number" inputmode="numeric"><label for="an">Имя</label><input id="an" placeholder="необязательно">
    <button class="btn wide" onclick="aAdd(this)">Добавить админа</button></div>`;
   else h+=`<div class="card mute small">Добавлять и убирать админов может только владелец.</div>`;
+  h+=`<h2>Пароль панели</h2><div class="card">
+   <label for="pwo">Старый пароль</label><input id="pwo" type="password" autocomplete="current-password">
+   <label for="pwn">Новый пароль (минимум 10 символов)</label><input id="pwn" type="password" autocomplete="new-password">
+   <label for="pwn2">Новый пароль ещё раз</label><input id="pwn2" type="password" autocomplete="new-password">
+   <button class="btn wide" onclick="chPass(this)">Сменить пароль</button></div>`;
   $('#v').innerHTML=h;
+}
+async function chPass(b){
+  const oldP=$('#pwo').value, n1=$('#pwn').value, n2=$('#pwn2').value;
+  if(n1.length<10) return toast('Новый пароль: минимум 10 символов');
+  if(n1!==n2) return toast('Новые пароли не совпадают');
+  b.disabled=true;
+  try{
+    const r=await fetch(BASE+'/passwd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:'admin',old:oldP,new:n1})});
+    const d=await r.json();
+    if(!d.ok) throw new Error(d.err||'Ошибка');
+    haptic('success'); note('Пароль сменён 🐾 браузер спросит его заново');
+    $('#pwo').value=$('#pwn').value=$('#pwn2').value='';
+  }catch(e){toast(e.message)}
+  b.disabled=false;
 }
 async function aAdd(b){b.disabled=true;try{await api('/admins','POST',{tg_id:+$('#ai').value,name:$('#an').value});haptic('success');rAdmins()}catch(e){toast(e.message);b.disabled=false}}
 async function aDel(id){if(await ask('Убрать админа?')){await api(`/admins/${id}`,'DELETE');rAdmins()}}

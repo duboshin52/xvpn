@@ -1,0 +1,11 @@
+[Unit]
+Description=xvpn webadmin password service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/xvpn-webadmin/passwd.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
