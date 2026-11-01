@@ -18,11 +18,11 @@
   --display:'Comfortaa',ui-rounded,system-ui,sans-serif; --body:'Nunito',ui-rounded,system-ui,sans-serif;
 }
 body.dark{
-  --paper:#1B1530; --card:#261D3F; --ink:#F2EBFF; --mute:#A496C4; --line:#3A2E5A;
+  --paper:#1B1530; --card:#261D3F; --ink:#F2EBFF; --mute:#B3A6D8; --line:#3A2E5A;
   --sakura-soft:#4A2741; --shadow:0 8px 24px -14px #000;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;background:var(--paper);color:var(--ink);font:500 15px/1.45 var(--body)}
+html,body{margin:0;background:var(--paper);color:var(--ink);font:500 16px/1.5 var(--body)}
 body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
 button,input{font:inherit;color:inherit}
 :focus-visible{outline:2px solid var(--sakura);outline-offset:2px}
@@ -32,6 +32,21 @@ main{padding:16px 14px 8px;max-width:640px;margin:0 auto}
 .mute{color:var(--mute)} .small{font-size:13px}
 .row{display:flex;align-items:center;gap:10px}.grow{flex:1;min-width:0}
 .card{background:var(--card);border-radius:var(--r);padding:14px;margin-bottom:10px;box-shadow:var(--shadow)}
+
+/* дружелюбие: плавное появление карточек, крупные зоны нажатия, отклик кнопок */
+.card,.yarn,.stat,.key{animation:rise .3s ease-out both}
+.card:nth-of-type(2),.key:nth-of-type(2){animation-delay:.04s}
+.card:nth-of-type(3),.key:nth-of-type(3){animation-delay:.08s}
+.card:nth-of-type(n+4),.key:nth-of-type(n+4){animation-delay:.12s}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}}
+.btn{min-height:44px;transition:transform .08s ease,opacity .15s}
+.btn:active{transform:scale(.96)}
+.btn:disabled{opacity:.55}
+/* всплывающее «Скопировано» вместо системных окон */
+#toast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(16px);
+  background:var(--ink);color:var(--paper);font-weight:800;font-size:14px;padding:10px 18px;border-radius:999px;
+  opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:30;box-shadow:var(--shadow)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
 /* шапка */
 .hello{display:flex;align-items:center;gap:12px;padding:4px 4px 2px}
@@ -67,7 +82,8 @@ main{padding:16px 14px 8px;max-width:640px;margin:0 auto}
 
 /* ключи */
 .search{display:flex;gap:8px;margin-bottom:12px}
-.key{display:flex;align-items:center;gap:12px;background:var(--card);border-radius:var(--r-s);padding:12px 14px;margin-bottom:8px;box-shadow:var(--shadow);width:100%;border:0;text-align:left;cursor:pointer}
+.key{display:flex;align-items:center;gap:12px;background:var(--card);border-radius:var(--r-s);padding:14px 16px;min-height:66px;margin-bottom:8px;box-shadow:var(--shadow);width:100%;border:0;text-align:left;cursor:pointer;transition:transform .08s ease}
+.key:active{transform:scale(.98)}
 .paw{width:22px;height:22px;flex:none}
 .key .bar{margin-top:6px}
 
@@ -116,6 +132,7 @@ details summary{cursor:pointer;font-weight:700;color:var(--mute);margin-top:12px
 <main id="v"><div class="empty" id="boot"></div></main>
 <nav id="nav"></nav>
 <div id="sheet" onclick="if(event.target===this)closeS()"><div class="panel"><svg id="ears" viewBox="0 0 120 20" aria-hidden="true"><path d="M8 20 L22 2 L38 20Z M82 20 L98 2 L112 20Z" style="fill:var(--card)"/></svg><div id="s"></div></div></div>
+<div id="toast" role="status"></div>
 <script>
 const tg = window.Telegram.WebApp; tg.ready(); tg.expand();
 const dark = tg.colorScheme === 'dark'; if (dark) document.body.classList.add('dark');
@@ -135,11 +152,15 @@ async function api(path, method='GET', body){
   return r.json();
 }
 const haptic = t => { try { tg.HapticFeedback.notificationOccurred(t) } catch (e) {} };
+const hapticTap = () => { try { tg.HapticFeedback.impactOccurred('light') } catch (e) {} };
+let _toastT = null;
+function note(m){ const t=$('#toast'); t.textContent=m; t.classList.add('show');
+  clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('show'),1800); }
 function toast(m){tg.showAlert?tg.showAlert(String(m)):alert(m)}
 function ask(m){return new Promise(r=>tg.showConfirm?tg.showConfirm(m,r):r(confirm(m)))}
 function openS(h){$('#s').innerHTML=h;$('#sheet').classList.add('open')}
 function closeS(){$('#sheet').classList.remove('open')}
-function copy(t){navigator.clipboard.writeText(t).then(()=>{haptic('success')},()=>toast(t))}
+function copy(t){navigator.clipboard.writeText(t).then(()=>{haptic('success');note('Скопировано 🐾')},()=>toast(t))}
 
 /* ---------- коты (оригинальная рисовка) ---------- */
 const COATS = ['#FFF6E9','#D9D3E6','#FFD9B8','#E8D9FF','#CFEFE4','#F3E1C9'];
@@ -176,7 +197,7 @@ const TABS = [
 $('#nav').innerHTML = TABS.map(([t,l,ic])=>`<button data-t="${t}" class="${t===TAB?'on':''}"><svg viewBox="0 0 24 24">${ic}</svg>${l}</button>`).join('');
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
-  TAB=b.dataset.t; window.scrollTo(0,0); render();
+  hapticTap(); TAB=b.dataset.t; window.scrollTo(0,0); render();
 });
 
 async function render(){
@@ -197,9 +218,15 @@ function groupExits(bridge, servers){
   });
 }
 function yarnSvg(bridge, exits){
-  const W=340, top=56, rowY=214, n=Math.max(exits.length,1), from=top+64;
+  const W=340, top=96, rowY=250, n=Math.max(exits.length,1), from=top+64;
   const bridgeUp = bridge.online && bridge.status?.xray?.active;
-  let s = `<svg viewBox="0 0 ${W} 280" role="img" aria-label="Схема каскада">`;
+  let s = `<svg viewBox="0 0 ${W} 320" role="img" aria-label="Схема каскада">`;
+  // вы (телефон) → нитка → мост
+  s += `<g transform="translate(${W/2-13} 2)"><rect x="0" y="0" width="26" height="40" rx="7" style="fill:var(--card);stroke:${bridgeUp?'var(--sakura)':'var(--line)'}" stroke-width="2"/>
+    <rect x="4.5" y="6" width="17" height="24" rx="3" style="fill:${bridgeUp?'var(--sakura-soft)':'var(--paper)'}"/>
+    <circle cx="13" cy="34.5" r="2.2" style="fill:var(--mute)"/></g>
+    <text x="${W/2}" y="58" text-anchor="middle" font-size="11.5" font-weight="800" style="font-family:var(--body);fill:var(--mute)">это вы</text>
+    <path class="thread ${bridgeUp?'on':'off'}" d="M${W/2} 62 C ${W/2} 74, ${W/2} 78, ${W/2} ${top-40}"/>`;
   // нитки
   exits.forEach((e,i)=>{
     const x = W*(i+.5)/n, on = bridgeUp && e.alive;
@@ -243,7 +270,7 @@ async function rStatus(){
   const allUp = o.servers.length && o.servers.every(s=>s.online&&s.status?.xray?.active);
   let h = `<header class="hello">${cat(allUp?'happy':(o.servers.length?'worried':'awake'),'#FFF6E9',58)}
     <div><h1>${greet()}, ${esc(ME.first_name||'хозяин')}</h1>
-    <div class="mute small">${!o.servers.length?'Серверов пока нет':allUp?'Все коты на месте':'Кто-то из котов спит — загляните ниже'}</div></div></header>
+    <div class="mute small">${!o.servers.length?'Серверов пока нет':allUp?'Все коты мурчат — всё работает':'Кто-то из котов спит — загляните ниже'}</div></div></header>
     <div class="stats"><div class="stat"><b>${o.keys_active}<span class="mute" style="font-size:14px">/${o.keys_total}</span></b><span>активных ключей</span></div>
     <div class="stat"><b>${o.keys_online}</b><span>онлайн сейчас</span></div>
     <div class="stat"><b>${fb(o.traffic_total).replace(' ','&nbsp;')}</b><span>трафик всего</span></div></div>`;
@@ -264,12 +291,13 @@ async function rStatus(){
     h += `</div></article>`;
   }
   if(!o.servers.length) h += `<div class="card empty">${cat('sleepy','#D9D3E6',72)}<p>Добавьте первый сервер — и тут появится его кот.</p><button class="btn" onclick="go('servers')">Добавить сервер</button></div>`;
-  else h += `<button class="btn soft card-bg wide" style="margin-top:4px" onclick="syncNow(this)">Синхронизировать сейчас</button>`;
+  else h += `<button class="btn soft card-bg wide" style="margin-top:4px" onclick="syncNow(this)">Синхронизировать сейчас</button>
+    <div class="mute small" style="text-align:center;margin-top:8px">Обновлено в ${new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})} · само обновляется каждые 15 сек</div>`;
   $('#v').innerHTML = h;
 }
 const meter=(l,v,p)=>`<div class="meter"><div><span>${l}</span><span>${v}</span></div><div class="bar"><i class="${p>85?'hot':''}" style="width:${p}%"></i></div></div>`;
 function go(t){document.querySelector(`nav button[data-t="${t}"]`).click()}
-async function restart(id){if(await ask('Перезапустить Xray? Соединения на пару секунд прервутся.')){try{await api(`/servers/${id}/restart`,'POST');haptic('success');toast('Xray перезапущен')}catch(e){toast(e.message)}}}
+async function restart(id){if(await ask('Перезапустить Xray? Соединения на пару секунд прервутся.')){try{await api(`/servers/${id}/restart`,'POST');haptic('success');note('Xray перезапущен 🐾')}catch(e){toast(e.message)}}}
 async function syncNow(b){b.disabled=true;b.textContent='Синхронизирую…';try{await api('/sync','POST');haptic('success');render()}catch(e){toast(e.message);b.disabled=false}}
 
 /* ---------- ключи ---------- */
