@@ -227,7 +227,9 @@ def server_links(srv: dict, k: dict, cdn_only: bool = False) -> list[str]:
                    f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={rc['host']}"
                    f"&path={quote(info['xhttp_path'], safe='')}&mode=packet-up&extra={extra}"
                    f"#{tag('РФ-CDN')}")
-    if info.get("domain") and cdn_on():
+    if info.get("domain") and (cdn_on() or cdn_only):
+        # в аварийном режиме (cdn_only) CF-ссылки добавляем даже при выключенном CDN:
+        # медленный канал лучше, чем никакого
         cdn += [f"vless://{u}@{info['domain']}:443?encryption=none&security=tls&sni={info['domain']}"
                f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={info['domain']}"
                # packet-up: каждый кусок — отдельный запрос; через Cloudflare работает и без gRPC
