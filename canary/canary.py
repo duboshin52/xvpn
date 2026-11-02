@@ -128,7 +128,11 @@ def cf_fix_dns(host: str, dead: list[str]) -> str:
 
 def http_status(url: str, timeout=10) -> int:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "xvpn-canary"})
+        # браузерный UA: Cloudflare Bot Fight Mode отдаёт 403 на небраузерные,
+        # клиентам подписки это не мешает, а мониторингу — да
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/131.0 Safari/537.36"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status
     except urllib.error.HTTPError as e:
@@ -228,7 +232,7 @@ def main():
     # 4. подписка отвечает (400/404 — норм: сервис жив, просто нет токена)
     if DOMAIN and SUB_PATH:
         st = http_status(f"https://{DOMAIN}{SUB_PATH}/canary")
-        report("sub:main", None if st in (400, 401, 404) else
+        report("sub:main", None if st in (400, 401, 403, 404) else
                f"подписка https://{DOMAIN} не отвечает (код {st})")
         ru = ((ov.get("servers") or [{}])[0].get("info") or {})  # ищем РФ-CDN у локальной ноды
         rc_host = ""
@@ -239,7 +243,7 @@ def main():
                 break
         if rc_host:
             st = http_status(f"https://{rc_host}{SUB_PATH}/canary")
-            report("sub:rucdn", None if st in (400, 401, 404) else
+            report("sub:rucdn", None if st in (400, 401, 403, 404) else
                    f"подписка через РФ-CDN ({rc_host}) не отвечает (код {st})")
 
     state["ts"] = now
