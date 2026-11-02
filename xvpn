@@ -131,7 +131,7 @@ cmd_qr() { # ИМЯ [N] [готовые links]
   local L text
   L=${3:-$(api GET "/keys/$(key_id "$1")/links")}
   if [[ -n "${2:-}" ]]; then text=$(jq -r --argjson n "$2" '.links[$n-1] // empty' <<<"$L")
-  else text=$(jq -r '.sub_url // .links[0] // empty' <<<"$L"); fi
+  else text=$(jq -r '.sub_url_ru // .sub_url // .links[0] // empty' <<<"$L"); fi
   [[ -n "$text" ]] || return 0
   command -v qrencode >/dev/null || { echo "${D}(для QR установите qrencode)${N}"; return; }
   echo; qrencode -t ansiutf8 "$text"

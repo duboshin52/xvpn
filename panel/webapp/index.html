@@ -335,13 +335,15 @@ async function doNewKey(b){
 }
 async function keyS(id){
   const k=KEYS.find(x=>x.id===id); const L=await api(`/keys/${id}/links`);
-  const cascade = L.links.filter(l=>decodeURIComponent(l.split('#')[1]||'').includes('Каскад')).length;
+  const sub=L.sub_url_ru||L.sub_url; // РФ-CDN в приоритете: Cloudflare у части операторов заблокирован
+  const cascade = L.links.filter(l=>{const t=decodeURIComponent(l.split('#')[1]||'');return t.includes('Каскад')||t.includes('Кластер')}).length;
   openS(`<div class="row">${pawSvg(STATE_COLOR[k.state])}<h3 class="grow">${esc(k.name)}</h3><span class="tag">${ST[k.state]}</span></div>
   <div class="mute small" style="margin-top:6px">${fb(k.used_bytes)} из ${k.limit_bytes?fb(k.limit_bytes):'∞'}, ${till(k.expire_at)}${k.last_active?`<br>Был в сети ${new Date(k.last_active*1000).toLocaleString('ru-RU')}`:''}</div>
   <div id="qr"></div>
-  <label>Подписка для Happ, Hiddify, v2RayTun, v2rayN</label><code onclick="copy(this.textContent)">${esc(L.sub_url)}</code>
+  <label>Подписка для Happ, Hiddify, v2RayTun, v2rayN${L.sub_url_ru?' (через РФ-CDN — устойчива к блокировкам)':''}</label><code onclick="copy(this.textContent)">${esc(sub)}</code>
+  ${L.sub_url_ru&&L.sub_url?`<label>Запасная подписка (Cloudflare)</label><code onclick="copy(this.textContent)">${esc(L.sub_url)}</code>`:''}
   ${cascade?`<div class="mute small">В подписке ${cascade===1?'есть':'есть'} каскад через Россию — он стоит первым и работает при белых списках.</div>`:''}
-  <div class="btns"><button class="btn" onclick="copy('${esc(L.sub_url)}')">Скопировать подписку</button></div>
+  <div class="btns"><button class="btn" onclick="copy('${esc(sub)}')">Скопировать подписку</button></div>
   <details><summary>Отдельные ссылки (${L.links.length})</summary>${L.links.map(l=>`<code onclick="copy(this.textContent)">${esc(l)}</code>`).join('')}</details>
   <h3 style="margin-top:18px;font-size:15px">Управление</h3>
   <div class="btns">
@@ -354,7 +356,7 @@ async function keyS(id){
    <button class="btn soft" onclick="kEdit(${id},{enabled:${k.enabled?0:1}})">${k.enabled?'Выключить':'Включить'}</button>
    <button class="btn soft" onclick="kRegen(${id})">Перевыпустить</button>
    <button class="btn danger" onclick="kDel(${id})">Удалить</button></div>`);
-  new QRCode($('#qr'),{text:L.sub_url,width:200,height:200,colorDark:'#2E2347',colorLight:'#ffffff'});
+  new QRCode($('#qr'),{text:sub,width:200,height:200,colorDark:'#2E2347',colorLight:'#ffffff'});
 }
 async function kEdit(id,b){try{await api(`/keys/${id}`,'PATCH',b);haptic('success');await rKeys();keyS(id)}catch(e){toast(e.message)}}
 function inputS(title,val,type,cb){window._icb=cb;openS(`<h3>${esc(title)}</h3><input id="iv" type="${type}" value="${esc(val)}" style="margin-top:12px"><button class="btn wide" onclick="window._icb($('#iv').value)">Сохранить</button>`);setTimeout(()=>$('#iv').focus(),120)}
