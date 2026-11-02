@@ -225,8 +225,9 @@ def main():
         ip = info.get("ip")
         if not ip:
             continue
-        sni = cl_sni or (info.get("reality") or {}).get("sni_tcp", "")
-        if cl and not cl_sni:
+        own = (info.get("reality") or {}).get("sni_tcp", "")
+        sni = own if info.get("standalone") else cl_sni or own
+        if cl and not cl_sni and not info.get("standalone"):
             cl_sni = sni  # у всех мостов в кластере один SNI
         if not sni:
             continue
@@ -242,7 +243,8 @@ def main():
         got = set(dns_addrs(host))
         # мост профиля «Мобильный» намеренно вне DNS кластера: клиенты идут на его IP
         live = {s["info"]["ip"] for s in bridges
-                if s.get("online") and (s.get("info") or {}).get("ip") and s["name"] != ov.get("mobile_bridge")}
+                if s.get("online") and (s.get("info") or {}).get("ip") and s["name"] != ov.get("mobile_bridge")
+                and not (s.get("info") or {}).get("standalone")}
         missing = live - got
         if missing:
             report("dns:missing",

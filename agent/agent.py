@@ -136,7 +136,8 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
             {"tag": "bridge-in", "listen": "0.0.0.0", "port": int(node.get("port", 443)), "protocol": "vless",
              "settings": {"clients": vision, "decryption": "none"},
              "streamSettings": {"network": "tcp", "security": "reality",
-                                "realitySettings": {"dest": f"{r['sni_tcp']}:443",
+                                # dest — свой сайт на этом же сервере, если мост маскируется под него
+                                "realitySettings": {"dest": r.get("dest") or f"{r['sni_tcp']}:443",
                                                     "serverNames": [r["sni_tcp"]],
                                                     "privateKey": r["private_key"],
                                                     "shortIds": [r["short_id"]]}},
@@ -309,6 +310,7 @@ def info():
     if role(n) == "bridge":
         return {"role": "bridge", "name": n.get("name", ""), "ip": n["ip"], "port": int(n.get("port", 443)),
                 "ru_cdn": n.get("ru_cdn"), "xhttp_path": n.get("xhttp_path"),
+                "standalone": bool(n.get("standalone")),
                 "reality": {"public_key": r["public_key"], "short_id": r["short_id"], "sni_tcp": r["sni_tcp"]}}
     return {
         "role": "exit", "name": n.get("name", ""), "ru_cdn": n.get("ru_cdn"),
@@ -325,7 +327,7 @@ def apply_cluster(cluster: dict | None) -> bool:
     cluster=dict — принять кластерные ключи (свои сохраняем в reality_own);
     cluster=None — вернуть собственные ключи. Возвращает True, если ключи сменились."""
     node = load_node()
-    if role(node) != "bridge":
+    if role(node) != "bridge" or node.get("standalone"):  # отдельный мост живёт со своими ключами
         return False
     if cluster:
         new = {"private_key": cluster["private_key"], "public_key": cluster["public_key"],

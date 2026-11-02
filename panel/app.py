@@ -279,7 +279,8 @@ def key_links(k: dict) -> list[str]:
     servers = [s for s in enabled if s["online"]]
     cl = cluster_conf()
     # главный может не видеть мосты, когда клиенты их видят: online здесь не решает
-    all_bridges = [s for s in enabled if s["role"] == "bridge"]
+    isolated = [s for s in enabled if s["role"] == "bridge" and json.loads(s["info"] or "{}").get("standalone")]
+    all_bridges = [s for s in enabled if s["role"] == "bridge" and s not in isolated]
     bridges = [s for s in all_bridges if s["online"]] or all_bridges
     if cl and len(all_bridges) >= 2:
         # кластер: одна ссылка на все мосты (DNS отдаёт адреса всех живых мостов)
@@ -303,6 +304,10 @@ def key_links(k: dict) -> list[str]:
             if (info.get("ru_cdn") or {}).get("host") and info.get("xhttp_path"):
                 out.append(ru_cdn_link(k, info, quote(f"Мобильный | {k['name']}")))
                 break
+    # отдельный мост со своей маскировкой — запасной конфиг только для выбранных ключей
+    if k["name"] in setting("site_bridge_keys", "").split():
+        for s in isolated:
+            out += server_links(s, k)
     if setting("emergency", "0") == "1":
         # аварийный канал: CDN-ссылки на выходы. IP серверов за CDN не светятся —
         # единственный путь, если адреса мостов оказались в блоке. Обычно скрыт.
@@ -1001,6 +1006,8 @@ async def api_settings_edit(body: dict, u=Depends(owner)):
         set_setting("emergency", "1" if body["emergency"] else "0")
     if "mobile_bridge" in body:
         set_setting("mobile_bridge", str(body["mobile_bridge"]))
+    if "site_bridge_keys" in body:
+        set_setting("site_bridge_keys", str(body["site_bridge_keys"]))
     if "exit_domains" in body:
         set_setting("exit_domains", json.dumps([str(d) for d in body["exit_domains"]]))
         asyncio.create_task(sync_now())

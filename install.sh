@@ -470,6 +470,9 @@ AGENT_MODE='tls'
 SNI_TCP='$SNI_TCP'
 NODE_NAME='$NODE_NAME'
 AGENT_PORT='$AGENT_PORT'
+REALITY_DEST='${REALITY_DEST:-}'
+STANDALONE='${STANDALONE:-}'
+BRIDGE_PORT='${BRIDGE_PORT:-443}'
 REALITY_PRIV='$REALITY_PRIV'
 REALITY_PUB='$REALITY_PUB'
 SHORT_ID='$(openssl rand -hex 8)'
@@ -488,9 +491,11 @@ EOF
   mkdir -p "$ROOT/agent"
   jq -n --arg ip "$SERVER_IP" --arg s "$AGENT_SECRET" --arg pk "$REALITY_PRIV" --arg pub "$REALITY_PUB" \
         --arg sid "$SHORT_ID" --arg st "$SNI_TCP" --arg nm "$NODE_NAME" \
-        --arg xp "${XHTTP_PATH:-}" --argjson rc "$rucdn" \
-    '{role:"bridge", name:$nm, ip:$ip, port:443, agent_secret:$s, xhttp_path:$xp, ru_cdn:$rc,
-      reality:{private_key:$pk, public_key:$pub, short_id:$sid, sni_tcp:$st}}' >"$ROOT/agent/node.json"
+        --arg xp "${XHTTP_PATH:-}" --argjson rc "$rucdn" --arg dst "${REALITY_DEST:-}" --arg sa "${STANDALONE:-}" \
+        --argjson port "${BRIDGE_PORT:-443}" \
+    '{role:"bridge", name:$nm, ip:$ip, port:$port, agent_secret:$s, xhttp_path:$xp, ru_cdn:$rc, standalone:($sa != ""),
+      reality:({private_key:$pk, public_key:$pub, short_id:$sid, sni_tcp:$st} + (if $dst != "" then {dest:$dst} else {} end))}' \
+    >"$ROOT/agent/node.json"
   chmod 600 "$ROOT/agent/node.json"
 }
 
