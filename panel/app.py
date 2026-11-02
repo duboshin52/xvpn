@@ -345,6 +345,14 @@ def exit_upstreams(bridge: dict) -> list[dict]:
     return out
 
 
+def exit_map_get() -> dict[int, int]:
+    """Привязки ключей к выходам каскада: {id ключа: id выхода}."""
+    try:
+        return {int(k): int(v) for k, v in json.loads(setting("exit_map", "") or "{}").items()}
+    except (ValueError, TypeError):
+        return {}
+
+
 def assign_exits(users: list[dict], sids: list[int]) -> list[dict]:
     """Умное закрепление ключей за выходами каскада: липко и по реальной нагрузке.
 
@@ -354,10 +362,7 @@ def assign_exits(users: list[dict], sids: list[int]) -> list[dict]:
     Привязки хранятся в settings.exit_map: {id ключа: id выхода}."""
     if not sids:
         return users
-    try:
-        m = {int(k): v for k, v in json.loads(setting("exit_map", "") or "{}").items()}
-    except (ValueError, TypeError):
-        m = {}
+    m = exit_map_get()
     kids = {int(u["email"][1:]) for u in users
             if u.get("email", "").startswith("k") and u["email"][1:].isdigit()}
     m = {k: v for k, v in m.items() if k in kids and v in sids}
@@ -718,7 +723,35 @@ def balancer_info():
 
 @app.get(P + "/api/keys")
 def api_keys(u=Depends(tg_user)):
-    return [key_out(k) for k in q("SELECT * FROM keys ORDER BY id DESC")]
+    m = exit_map_get()
+    names = {s["id"]: s["name"] for s in q("SELECT id, name FROM servers WHERE role='exit'")}
+    out = []
+    for k in q("SELECT * FROM keys ORDER BY id DESC"):
+        ko = key_out(k)
+        ko["exit"] = m.get(k["id"])
+        ko["exit_name"] = names.get(ko["exit"]) if ko["exit"] else None
+        out.append(ko)
+    return out
+
+
+@app.post(P + "/api/keys/{kid}/exit")
+async def api_key_exit(kid: int, body: dict, u=Depends(tg_user)):
+    """Принудительная смена выхода каскада для ключа (exit=null — автоназначение)."""
+    if not q("SELECT 1 AS x FROM keys WHERE id=?", (kid,), one=True):
+        raise HTTPException(404, "нет такого ключа")
+    sid = body.get("exit")
+    m = exit_map_get()
+    if sid is None:
+        m.pop(kid, None)
+    else:
+        ok = q("SELECT 1 AS x FROM servers WHERE id=? AND role='exit' AND cascade=1 AND enabled=1",
+               (int(sid),), one=True)
+        if not ok:
+            raise HTTPException(400, "такого активного выхода каскада нет")
+        m[kid] = int(sid)
+    set_setting("exit_map", json.dumps(m))
+    await sync_now()
+    return {"ok": True, "exit": sid}
 
 
 @app.post(P + "/api/keys")
