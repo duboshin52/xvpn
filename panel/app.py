@@ -100,6 +100,29 @@ def cdn_on() -> bool:
 
 
 # ---------------------------------------------------------------- keys
+_ru_cdn_cache = {"t": 0.0, "host": ""}
+
+
+def main_ru_cdn() -> str:
+    """Хост российского CDN главного сервера (если настроен xvpn rucdn).
+
+    Через него доступна подписка, когда Cloudflare из сети клиента тормозит."""
+    now = time.time()
+    if now - _ru_cdn_cache["t"] < 60:
+        return _ru_cdn_cache["host"]
+    host = ""
+    local = os.environ.get("LOCAL_AGENT_URL", "")
+    if local:
+        try:
+            r = q("SELECT info FROM servers WHERE url=?", (local,))
+            if r:
+                host = (json.loads(r[0]["info"] or "{}").get("ru_cdn") or {}).get("host", "")
+        except Exception:
+            pass
+    _ru_cdn_cache.update(t=now, host=host)
+    return host
+
+
 def key_state(k: dict) -> str:
     now = time.time()
     if not k["enabled"]:
@@ -115,6 +138,8 @@ def key_out(k: dict) -> dict:
     k = dict(k)
     k["state"] = key_state(k)
     k["sub_url"] = f"https://{DOMAIN}{SUB_PATH}/{k['sub_token']}" if DOMAIN else None
+    rc = main_ru_cdn()
+    k["sub_url_ru"] = f"https://{rc}{SUB_PATH}/{k['sub_token']}" if rc else None
     k["online"] = k["last_active"] > time.time() - 180
     return k
 
@@ -412,7 +437,8 @@ async def cmd_newkey(m: Message, command: CommandObject):
     k = key_out(create_key(args[0], days, gb, m.from_user.id))
     asyncio.create_task(sync_now())
     if k["sub_url"]:
-        return await m.answer(f"Ключ <b>{k['name']}</b> создан.\nПодписка:\n<code>{k['sub_url']}</code>",
+        ru = f"\nЗапасная (через РФ-CDN):\n<code>{k['sub_url_ru']}</code>" if k.get("sub_url_ru") else ""
+        return await m.answer(f"Ключ <b>{k['name']}</b> создан.\nПодписка:\n<code>{k['sub_url']}</code>{ru}",
                               parse_mode="HTML")
     links = "\n\n".join(f"<code>{l}</code>" for l in key_links(k))
     await m.answer(f"Ключ <b>{k['name']}</b> создан.\n\n{links or 'Серверов пока нет'}", parse_mode="HTML")
@@ -616,7 +642,8 @@ def api_key_links(kid: int, u=Depends(tg_user)):
     k = q("SELECT * FROM keys WHERE id=?", (kid,), one=True)
     if not k:
         raise HTTPException(404)
-    return {"sub_url": key_out(k)["sub_url"], "links": key_links(k)}
+    ko = key_out(k)
+    return {"sub_url": ko["sub_url"], "sub_url_ru": ko["sub_url_ru"], "links": key_links(k)}
 
 
 @app.post(P + "/api/servers")

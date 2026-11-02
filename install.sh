@@ -528,12 +528,15 @@ EOF
   if [[ -z "$DOMAIN" && -z "${ORIGIN_HOST:-}" ]]; then
     rm -f /etc/nginx/sites-enabled/xvpn.conf /etc/nginx/sites-available/xvpn.conf
   else
-    local panel_locs=""
+    local panel_locs="" sub_loc=""
     if [[ -f "$ETC/panel.env" ]]; then
       # shellcheck disable=SC1091
       source "$ETC/panel.env"
       panel_locs="
     location /$PANEL_PATH/ { proxy_pass http://127.0.0.1:8080; include /etc/nginx/xvpn_proxy.conf; }
+    location /$SUB_PATH/   { proxy_pass http://127.0.0.1:8080; include /etc/nginx/xvpn_proxy.conf; }"
+      # подписка и через российский CDN — на случай, когда Cloudflare из сети клиента тормозит
+      sub_loc="
     location /$SUB_PATH/   { proxy_pass http://127.0.0.1:8080; include /etc/nginx/xvpn_proxy.conf; }"
     fi
     local agent_loc=""
@@ -602,7 +605,7 @@ server {
         proxy_set_header Connection "";
         proxy_read_timeout 1h;
         proxy_send_timeout 1h;
-    }
+    }$sub_loc
     location / { try_files \$uri /index.html; }
 }
 EOF

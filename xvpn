@@ -117,6 +117,9 @@ cmd_show() {
   if [[ $(jq -r '.sub_url // empty' <<<"$L") ]]; then
     echo; echo "${B}Подписка${N} (Happ, Hiddify, v2RayTun, v2rayN):"; jq -r .sub_url <<<"$L"
   fi
+  if [[ $(jq -r '.sub_url_ru // empty' <<<"$L") ]]; then
+    echo; echo "${B}Подписка через РФ-CDN${N} (когда Cloudflare тормозит — держите обе):"; jq -r .sub_url_ru <<<"$L"
+  fi
   echo; echo "${B}Ссылки${N}:"
   jq -r '.links | to_entries[] | "\(.key+1)) \(.value)"' <<<"$L"
   [[ $(jq '.links | length' <<<"$L") == 0 ]] && echo "${Y}Серверов с этим ключом пока нет — xvpn servers${N}"
