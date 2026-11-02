@@ -52,6 +52,7 @@ ${B}Веб-панель и балансировщик${N}
                                   где панель стоит: показать адрес, логин и пароль
   xvpn webadmin-allow 'ssh-…'     разрешить SSH-туннель веб-панели (на главном)
   xvpn balancer                   установить/обновить балансировщик трафика (на главном)
+  xvpn canary                     установить/обновить канарейку — мониторинг с TG-алертами (на главном)
 EOF
 }
 
@@ -261,6 +262,8 @@ case "$cmd" in
     fi ;;
   balancer) need_main; inst=$(src_install); [[ -n "$inst" ]] || die "Нет /opt/xvpn/src — выполните xvpn update"
     exec bash "$inst" balancer ;;
+  canary) need_main; inst=$(src_install); [[ -n "$inst" ]] || die "Нет /opt/xvpn/src — выполните xvpn update"
+    exec bash "$inst" canary ;;
   cdn)
     need_main
     case "${1:-}" in

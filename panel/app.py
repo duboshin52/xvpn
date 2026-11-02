@@ -250,16 +250,19 @@ def cluster_link(cl: dict, k: dict) -> str:
 
 
 def key_links(k: dict) -> list[str]:
-    out = []
-    # мосты (каскад) первыми: они работают и при белых списках;
-    # недоступные ноды (online=0 по итогам sync) из подписок убираем
+    # В подписке — только каскад: прямые ссылки на выходы не светим,
+    # чтобы клиенты не ходили мимо российских мостов (меньше поводов для блокировки).
+    # Недоступные ноды (online=0 по итогам sync) из подписок убираем.
     servers = q("SELECT * FROM servers WHERE enabled=1 AND online=1 ORDER BY role='bridge' DESC, id")
     cl = cluster_conf()
     bridges = [s for s in servers if s["role"] == "bridge"]
     if cl and len(bridges) >= 2:
         # кластер: одна ссылка на все мосты (DNS отдаёт адреса всех живых мостов)
-        out.append(cluster_link(cl, k))
-        servers = [s for s in servers if s["role"] != "bridge"]
+        return [cluster_link(cl, k)]
+    if bridges:
+        return [l for s in bridges for l in server_links(s, k)]
+    # мостов нет — прямые ссылки на выходы
+    out = []
     for s in servers:
         out += server_links(s, k)
     return out
@@ -342,10 +345,57 @@ def exit_upstreams(bridge: dict) -> list[dict]:
     return out
 
 
+def assign_exits(users: list[dict], sids: list[int]) -> list[dict]:
+    """Умное закрепление ключей за выходами каскада: липко и по реальной нагрузке.
+
+    В отличие от деления по номеру ключа, новый ключ уходит на самый ненагруженный
+    выход (по сумме used_bytes закреплённых за ним ключей); при явном перекосе
+    один ключ за синк переезжает с самого нагруженного выхода на самый свободный.
+    Привязки хранятся в settings.exit_map: {id ключа: id выхода}."""
+    if not sids:
+        return users
+    try:
+        m = {int(k): v for k, v in json.loads(setting("exit_map", "") or "{}").items()}
+    except (ValueError, TypeError):
+        m = {}
+    kids = {int(u["email"][1:]) for u in users
+            if u.get("email", "").startswith("k") and u["email"][1:].isdigit()}
+    m = {k: v for k, v in m.items() if k in kids and v in sids}
+    used = {r["id"]: r["used_bytes"] for r in q("SELECT id, used_bytes FROM keys")}
+
+    def load(sid: int) -> int:
+        return sum(used.get(k, 0) for k, v in m.items() if v == sid)
+
+    changed = False
+    for kid in kids - set(m):
+        m[kid] = min(sids, key=lambda s: (load(s), sids.index(s)))
+        changed = True
+    if len(sids) > 1:
+        loads = {s: load(s) for s in sids}
+        heavy, light = max(loads, key=loads.get), min(loads, key=loads.get)
+        # перекос больше чем вдвое и хотя бы на 20 ГБ — перекидываем самый лёгкий ключ
+        if loads[heavy] > 2 * loads[light] + 20 * GB:
+            cand = [k for k, v in m.items() if v == heavy]
+            if cand:
+                m[min(cand, key=lambda k: used.get(k, 0))] = light
+                changed = True
+    if changed:
+        set_setting("exit_map", json.dumps(m))
+    out = []
+    for u in users:
+        e = u.get("email", "")
+        if e.startswith("k") and e[1:].isdigit() and int(e[1:]) in m:
+            out.append(u | {"exit": m[int(e[1:])]})
+        else:
+            out.append(u)
+    return out
+
+
 def sync_body(srv: dict, users: list[dict]) -> dict:
     if srv["role"] == "bridge":
         c = cluster_conf()
-        return {"users": users, "upstreams": exit_upstreams(srv),
+        sids = [s["id"] for s in q("SELECT id FROM servers WHERE role='exit' AND cascade=1 ORDER BY id")]
+        return {"users": assign_exits(users, sids), "upstreams": exit_upstreams(srv),
                 "cluster": {k: c[k] for k in ("private_key", "public_key", "short_id", "sni_tcp")} if c else None}
     return {"users": users + bridge_users()}
 

@@ -11,8 +11,8 @@
 Роли ноды (node.json → role):
   exit   - обычная нода: XHTTP через Cloudflare + Reality + XHTTP-Reality, трафик выходит в интернет
   bridge - мост каскада (РФ): VLESS+Reality+Vision для клиентов, российские сайты напрямую,
-           остальное через выходы (несколько — пользователи закреплены за выходами по номеру
-           ключа, внутри выхода leastPing, при падении — перекрёстный резерв; проверка каждые 30 с)
+           остальное через выходы (несколько — пользователи закреплены за выходами панелью
+           по нагрузке, внутри выхода leastPing, при падении — перекрёстный резерв; проверка каждые 30 с)
 """
 import urllib.request
 import hashlib
@@ -100,17 +100,22 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
             last["outboundTag"] = exits[0]["tag"]
     else:
         last["balancerTag"] = f"exits-{srv_ids[0]}"
-    # распределение пользователей по выходам: каждый ключ закреплён за своим
-    # сервером (по номеру ключа), при падении сервера группа уходит на соседний
+    # распределение пользователей по выходам: панель закрепляет каждый ключ за своим
+    # сервером (по реальной нагрузке, липко); без привязки — по номеру ключа,
+    # при падении сервера группа уходит на соседний
     user_rules = []
     if nsrv > 1:
-        groups: list[list[str]] = [[] for _ in srv_ids]
+        groups: dict[str, list[str]] = {sid: [] for sid in srv_ids}
         for u in users:
-            m = re.search(r"\d+", u.get("email") or "")
-            groups[int(m.group()) % nsrv if m else 0].append(u["email"])
-        for i, sid in enumerate(srv_ids):
-            if groups[i]:
-                user_rules.append({"type": "field", "user": groups[i], "balancerTag": f"exits-{sid}"})
+            ex = str(u.get("exit") or "")
+            if ex in groups:
+                groups[ex].append(u["email"])
+            else:
+                m = re.search(r"\d+", u.get("email") or "")
+                groups[srv_ids[int(m.group()) % nsrv if m else 0]].append(u["email"])
+        for sid in srv_ids:
+            if groups[sid]:
+                user_rules.append({"type": "field", "user": groups[sid], "balancerTag": f"exits-{sid}"})
     cfg = _common(node) | {
         "inbounds": [
             {"tag": "api", "listen": "127.0.0.1", "port": 10085,
@@ -241,7 +246,8 @@ def load_upstreams() -> list[dict]:
 
 def apply_users(users: list[dict], upstreams: list[dict] | None = None) -> bool:
     """Пишет конфиг и перезапускает Xray, только если что-то поменялось."""
-    users = sorted(({"email": u["email"], "uuid": u["uuid"]} for u in users), key=lambda u: u["email"])
+    users = sorted(({"email": u["email"], "uuid": u["uuid"], "exit": u.get("exit")} for u in users),
+                   key=lambda u: u["email"])
     node = load_node()
     if role(node) == "bridge":
         if upstreams is None:

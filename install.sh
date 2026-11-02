@@ -102,6 +102,7 @@ menu() {
   Дополнительно (на уже установленный сервер)
     9) Веб-панель управления в браузере (HTTPS, логин/пароль, свой порт)
    10) Балансировщик трафика — ротация выходов каскада (на главном сервере)
+   11) Канарейка — мониторинг маскировки/DNS/нод с алертами в Telegram (на главном)
 
 EOF
   local n
@@ -117,6 +118,7 @@ EOF
     8) MODE=uninstall ;;
     9) MODE=webadmin ;;
     10) MODE=balancer ;;
+    11) MODE=canary ;;
     *) die "Нет такого пункта" ;;
   esac
 }
@@ -125,8 +127,8 @@ EOF
 [[ "$MODE" == info ]] && MODE=code
 [[ "$MODE" == panel ]] && { MODE=server; BOT=yes; }
 [[ "$MODE" == remove ]] && MODE=uninstall
-[[ "$MODE" =~ ^(server|node|bridge|update|code|reinstall|uninstall|rucdn|webadmin|balancer)$ ]] \
-  || die "Использование: bash install.sh [server|panel|node|bridge|update|code|rucdn|webadmin|balancer|reinstall|uninstall]"
+[[ "$MODE" =~ ^(server|node|bridge|update|code|reinstall|uninstall|rucdn|webadmin|balancer|canary)$ ]] \
+  || die "Использование: bash install.sh [server|panel|node|bridge|update|code|rucdn|webadmin|balancer|canary|reinstall|uninstall]"
 
 # ---------------------------------------------------------------- сеть
 
@@ -778,10 +780,11 @@ do_uninstall() {
   backup
   c "Удаляю xvpn…"
   local u
-  for u in xvpn-panel xvpn-agent xray xvpn-backup.timer xvpn-balancer.timer; do systemctl disable --now "$u" >/dev/null 2>&1 || true; done
+  for u in xvpn-panel xvpn-agent xray xvpn-backup.timer xvpn-balancer.timer xvpn-canary.timer; do systemctl disable --now "$u" >/dev/null 2>&1 || true; done
   rm -rf /etc/systemd/system/xvpn-panel.service /etc/systemd/system/xvpn-agent.service \
          /etc/systemd/system/xvpn-backup.service /etc/systemd/system/xvpn-backup.timer \
          /etc/systemd/system/xvpn-balancer.service /etc/systemd/system/xvpn-balancer.timer \
+         /etc/systemd/system/xvpn-canary.service /etc/systemd/system/xvpn-canary.timer \
          /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
          /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d
   systemctl daemon-reload
@@ -954,6 +957,7 @@ do_update() {
   # дополнительные компоненты: бэкап ставим всем, у кого есть панель; балансировщик — если был
   install_backup
   [[ -f /etc/systemd/system/xvpn-balancer.timer ]] && install_balancer
+  [[ -f /etc/systemd/system/xvpn-canary.timer ]] && install_canary
   if [[ -f /etc/xvpn/webadmin.env ]]; then
     cp "$SRC/panel/webapp/admin.html" /opt/xvpn-webadmin/index.html 2>/dev/null || true
     cp "$SRC/panel/webadmin-passwd.py" /opt/xvpn-webadmin/passwd.py 2>/dev/null || true
@@ -999,6 +1003,26 @@ install_backup() {
   systemctl daemon-reload
   systemctl enable --now xvpn-backup.timer >/dev/null 2>&1
   ok "Бэкапы: ежедневно в /root/xvpn-backups (настройки: $ETC/backup.env)"
+}
+
+# ---------------------------------------------------------------- канарейка
+
+install_canary() {
+  [[ -f "$ETC/panel.env" ]] || die "Канарейка ставится на главный сервер (здесь нет панели)"
+  c "Канарейка — мониторинг маскировки, DNS и нод с алертами в Telegram…"
+  mkdir -p "$ROOT/canary"
+  cp "$SRC/canary/canary.py" "$ROOT/canary/"
+  cp "$SRC/canary/xvpn-canary.service" "$SRC/canary/xvpn-canary.timer" /etc/systemd/system/
+  if [[ ! -f "$ETC/canary.env" ]]; then
+    cp "$SRC/canary/canary.env.example" "$ETC/canary.env"
+    chmod 600 "$ETC/canary.env"
+  fi
+  systemctl daemon-reload
+  systemctl enable --now xvpn-canary.timer >/dev/null 2>&1
+  python3 "$ROOT/canary/canary.py" || true
+  ok "Канарейка включена: проверки каждые 5 минут, алерты в Telegram владельцу"
+  echo "  Автоочистка DNS от мёртвых IP: впишите CF_TOKEN и CF_ZONE в $ETC/canary.env"
+  echo "  Лог: journalctl -u xvpn-canary"
 }
 
 # ---------------------------------------------------------------- веб-панель
@@ -1212,6 +1236,7 @@ run_mode() {
     rucdn) do_rucdn "$@" ;;
     webadmin) install_webadmin ;;
     balancer) install_balancer ;;
+    canary) install_canary ;;
     uninstall) do_uninstall 0 ;;
     reinstall)
       installed || die "xvpn не установлен — выберите установку в меню"

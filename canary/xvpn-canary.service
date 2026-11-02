@@ -1,0 +1,7 @@
+[Unit]
+Description=xvpn canary monitoring run
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/xvpn/canary.env
+ExecStart=/usr/bin/python3 /opt/xvpn/canary/canary.py
