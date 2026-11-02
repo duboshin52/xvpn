@@ -305,7 +305,8 @@ def key_links(k: dict) -> list[str]:
                 out.append(ru_cdn_link(k, info, quote(f"Мобильный | {k['name']}")))
                 break
     # отдельный мост со своей маскировкой — запасной конфиг только для выбранных ключей
-    if k["name"] in setting("site_bridge_keys", "").split():
+    site_keys = setting("site_bridge_keys", "").split()
+    if "*" in site_keys or k["name"] in site_keys:
         for s in isolated:
             out += server_links(s, k)
     if setting("emergency", "0") == "1":
