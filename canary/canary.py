@@ -45,7 +45,7 @@ CLI_TOKEN = panel.get("CLI_TOKEN", "")
 BOT_TOKEN = panel.get("BOT_TOKEN", "")
 OWNER_ID = panel.get("OWNER_ID", "")
 DOMAIN = panel.get("DOMAIN", "")
-SUB_PATH = panel.get("SUB_PATH", "")
+SUB_PATH = "/" + panel.get("SUB_PATH", "").lstrip("/")
 API = f"http://127.0.0.1:8080/{panel.get('PANEL_PATH', '')}/api"
 
 CF_TOKEN = conf.get("CF_TOKEN", "")
