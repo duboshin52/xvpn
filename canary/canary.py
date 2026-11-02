@@ -163,6 +163,7 @@ def main():
     servers = ov.get("servers") or []
     cl = ov.get("cluster")
     now = int(time.time())
+    mask = state.setdefault("mask", {})  # ip -> {"ok": bool, "ts": ts} — маскировка по TLS
 
     # 1. живость нод
     for s in servers:
@@ -187,6 +188,7 @@ def main():
         if not sni:
             continue
         ok, det = tls_cert_ok(ip, sni)
+        mask[ip] = {"ok": ok, "ts": now}
         report(f"mask:{ip}", None if ok else
                f"маскировка моста «{s['name']}» ({ip}) сломана: {det}. "
                f"Проверь, что {sni} отвечает по TLS, или смени SNI")
@@ -197,7 +199,6 @@ def main():
         got = set(dns_addrs(host))
         live = {s["info"]["ip"] for s in bridges
                 if s.get("online") and (s.get("info") or {}).get("ip")}
-        dead_known = set(state.get("dns_extra", []))  # дополнительные IP в DNS (не ноды панели)
         missing = live - got
         if missing:
             report("dns:missing",
@@ -208,14 +209,10 @@ def main():
         # мёртвые IP в DNS: не принадлежат живым мостам и не отвечают по маскировке
         suspicious = []
         for ip in got - live:
-            if ip in dead_known:  # уже проверяли — известный доп. адрес, просто следим
-                ok, _ = tls_cert_ok(ip, cl_sni or "ya.ru")
-                if not ok:
-                    suspicious.append(ip)
-            else:
-                ok, _ = tls_cert_ok(ip, cl_sni or "ya.ru")
-                if not ok:
-                    suspicious.append(ip)
+            ok, _ = tls_cert_ok(ip, cl_sni or "ya.ru")
+            mask[ip] = {"ok": ok, "ts": now}
+            if not ok:
+                suspicious.append(ip)
         if suspicious:
             fixed = ""
             if CF_TOKEN and CF_ZONE and not DRY_RUN:

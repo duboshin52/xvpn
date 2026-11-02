@@ -699,7 +699,8 @@ def api_overview(u=Depends(tg_user)):
             "keys_online": sum(k["last_active"] > time.time() - 180 for k in keys),
             "traffic_total": sum(k["used_bytes"] for k in keys),
             "cluster": {"host": cl["host"], "addrs": cluster_dns(cl["host"])} if cl else None,
-            "balancer": balancer_info()}
+            "balancer": balancer_info(),
+            "canary": canary_info()}
 
 
 def cluster_dns(host: str) -> list[str]:
@@ -726,6 +727,15 @@ def balancer_info():
         return {"limit_bytes": int(limit_gb * 1024**3),
                 "served": {int(k): v for k, v in (st.get("served") or {}).items()},
                 "ts": st.get("ts", 0)}
+    except FileNotFoundError:
+        return None
+
+
+def canary_info():
+    """Маскировка точек входа по данным канарейки: {ip: {"ok": bool, "ts": ts}}."""
+    try:
+        st = json.load(open("/etc/xvpn/canary.json", encoding="utf-8"))
+        return {"mask": st.get("mask") or {}, "ts": st.get("ts", 0)}
     except FileNotFoundError:
         return None
 
