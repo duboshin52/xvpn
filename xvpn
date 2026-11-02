@@ -36,6 +36,7 @@ ${B}Серверы${N} (на главном сервере)
   xvpn server hide|show ИМЯ|ID    скрыть из подписок / вернуть
   xvpn server rename ИМЯ|ID НОВОЕ переименовать
   xvpn cdn [on|off]               XHTTP через Cloudflare в подписках (в РФ его часто замедляют)
+  xvpn cluster [on ДОМЕН|off]     кластер мостов: одна ссылка на все РФ-входы (домен с A-записями на мосты)
   xvpn rucdn [off]                вход через российский CDN (Yandex Cloud CDN и др.) на этом сервере
   xvpn sync                       синхронизировать сейчас
 
@@ -271,6 +272,24 @@ case "$cmd" in
       ok "CDN-ссылки (XHTTP через Cloudflare) есть в подписках"
     else
       ok "CDN-ссылки убраны из подписок. Клиентам — обновить подписку. Вернуть: xvpn cdn on"
+    fi ;;
+  cluster)
+    need_main
+    case "${1:-}" in
+      on) [[ -n "${2:-}" ]] || die "xvpn cluster on ДОМЕН — домен с A-записями на все мосты (в Cloudflare — серая тучка, без прокси)"
+          api PATCH /settings "$(jq -nc --arg h "$2" '{cluster:true, cluster_host:$h}')" >/dev/null ;;
+      off) api PATCH /settings '{"cluster":false}' >/dev/null ;;
+      "") ;;
+      *) die "xvpn cluster [on ДОМЕН|off]" ;;
+    esac
+    s=$(api GET /settings)
+    if [[ $(jq -r .cluster <<<"$s") == true ]]; then
+      ok "Кластер мостов включён: $(jq -r .cluster_host <<<"$s")"
+      echo "  В подписках — одна ссылка «Кластер RU» вместо отдельных мостов."
+      echo "  DNS: A-записи домена должны указывать на все мосты (без прокси Cloudflare)."
+      echo "  Клиентам — один раз обновить подписку: старые ссылки мостов перестанут работать."
+    else
+      ok "Кластер мостов выключен — мосты в подписках по отдельности"
     fi ;;
   status) cmd_status ;;
   code|info) inst=$(src_install); [[ -n "$inst" ]] || die "Нет /opt/xvpn/src — выполните xvpn update"; bash "$inst" code ;;

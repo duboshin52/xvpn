@@ -50,6 +50,11 @@ def load_node() -> dict:
         return json.load(f)
 
 
+def save_node(node: dict) -> None:
+    with open(NODE_FILE, "w") as f:
+        json.dump(node, f, indent=2, ensure_ascii=False)
+
+
 def auth(authorization: str = Header(default="")):
     secret = load_node()["agent_secret"]
     if not hmac.compare_digest(authorization.encode(), f"Bearer {secret}".encode()):
@@ -281,10 +286,39 @@ def info():
     }
 
 
+def apply_cluster(cluster: dict | None) -> bool:
+    """Кластер мостов: общая Reality-идентичность (одна ссылка на все мосты).
+
+    cluster=dict — принять кластерные ключи (свои сохраняем в reality_own);
+    cluster=None — вернуть собственные ключи. Возвращает True, если ключи сменились."""
+    node = load_node()
+    if role(node) != "bridge":
+        return False
+    if cluster:
+        new = {"private_key": cluster["private_key"], "public_key": cluster["public_key"],
+               "short_id": cluster["short_id"], "sni_tcp": cluster["sni_tcp"]}
+        cur = node["reality"]
+        if all(cur.get(k) == v for k, v in new.items()):
+            return False
+        if "reality_own" not in node:
+            node["reality_own"] = dict(cur)
+        node["reality"] = cur | new
+        save_node(node)
+        return True
+    if "reality_own" in node:
+        node["reality"] = node.pop("reality_own")
+        save_node(node)
+        return True
+    return False
+
+
 @app.post("/sync", dependencies=[Depends(auth)])
 def sync(body: dict):
+    keys_changed = False
+    if "cluster" in body:
+        keys_changed = apply_cluster(body["cluster"])
     changed = apply_users(body.get("users", []), body.get("upstreams"))
-    return {"ok": True, "changed": changed}
+    return {"ok": True, "changed": changed or keys_changed}
 
 
 @app.get("/stats", dependencies=[Depends(auth)])

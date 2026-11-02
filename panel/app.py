@@ -99,6 +99,51 @@ def cdn_on() -> bool:
     return setting("cdn", "1") == "1"
 
 
+# ---------------------------------------------------------------- кластер мостов
+def cluster_conf() -> dict | None:
+    """Настройки кластера мостов (общая Reality-идентичность) или None, если выключен."""
+    if setting("cluster", "0") != "1":
+        return None
+    host = setting("cluster_host", "")
+    try:
+        r = json.loads(setting("cluster_reality", "") or "{}")
+    except ValueError:
+        r = {}
+    if host and r.get("private_key"):
+        return {"host": host, **r}
+    return None
+
+
+def cluster_enable(host: str) -> dict:
+    """Включить кластер мостов: сгенерировать общую Reality-идентичность, если её ещё нет."""
+    import re as _re
+    import subprocess
+    host = host.strip().lower()
+    if not _re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", host):
+        raise HTTPException(400, "Нужен домен кластера, например ru.example.com")
+    try:
+        r = json.loads(setting("cluster_reality", "") or "{}")
+    except ValueError:
+        r = {}
+    if not r.get("private_key"):
+        kp = subprocess.run(["/usr/local/bin/xray", "x25519"], capture_output=True, text=True)
+        priv = _re.search(r"Private(?:\s+[Kk]ey)?:\s*(\S+)", kp.stdout)
+        pub = _re.search(r"Public(?:\s+[Kk]ey)?:\s*(\S+)", kp.stdout)
+        if not priv or not pub:
+            raise HTTPException(500, "Не удалось сгенерировать ключи: " + kp.stdout[:200])
+        b = q("SELECT info FROM servers WHERE role='bridge' ORDER BY id LIMIT 1")
+        sni = "ya.ru"
+        if b:
+            with contextlib.suppress(Exception):
+                sni = json.loads(b[0]["info"] or "{}")["reality"]["sni_tcp"]
+        r = {"private_key": priv.group(1), "public_key": pub.group(1),
+             "short_id": secrets.token_hex(8), "sni_tcp": sni}
+        set_setting("cluster_reality", json.dumps(r))
+    set_setting("cluster_host", host)
+    set_setting("cluster", "1")
+    return {"host": host, **r}
+
+
 # ---------------------------------------------------------------- keys
 _ru_cdn_cache = {"t": 0.0, "host": ""}
 
@@ -191,11 +236,24 @@ def server_links(srv: dict, k: dict) -> list[str]:
     ]
 
 
+def cluster_link(cl: dict, k: dict) -> str:
+    return (f"vless://{k['uuid']}@{cl['host']}:443?encryption=none&security=reality"
+            f"&sni={cl['sni_tcp']}&fp=chrome&pbk={cl['public_key']}&sid={cl['short_id']}"
+            f"&type=tcp&flow=xtls-rprx-vision#{quote('Кластер RU | ' + k['name'])}")
+
+
 def key_links(k: dict) -> list[str]:
     out = []
     # мосты (каскад) первыми: они работают и при белых списках;
     # недоступные ноды (online=0 по итогам sync) из подписок убираем
-    for s in q("SELECT * FROM servers WHERE enabled=1 AND online=1 ORDER BY role='bridge' DESC, id"):
+    servers = q("SELECT * FROM servers WHERE enabled=1 AND online=1 ORDER BY role='bridge' DESC, id")
+    cl = cluster_conf()
+    bridges = [s for s in servers if s["role"] == "bridge"]
+    if cl and len(bridges) >= 2:
+        # кластер: одна ссылка на все мосты (DNS отдаёт адреса всех живых мостов)
+        out.append(cluster_link(cl, k))
+        servers = [s for s in servers if s["role"] != "bridge"]
+    for s in servers:
         out += server_links(s, k)
     return out
 
@@ -279,7 +337,9 @@ def exit_upstreams(bridge: dict) -> list[dict]:
 
 def sync_body(srv: dict, users: list[dict]) -> dict:
     if srv["role"] == "bridge":
-        return {"users": users, "upstreams": exit_upstreams(srv)}
+        c = cluster_conf()
+        return {"users": users, "upstreams": exit_upstreams(srv),
+                "cluster": {k: c[k] for k in ("private_key", "public_key", "short_id", "sni_tcp")} if c else None}
     return {"users": users + bridge_users()}
 
 
@@ -723,14 +783,23 @@ async def api_server_restart(sid: int, u=Depends(tg_user)):
 
 @app.get(P + "/api/settings")
 def api_settings(u=Depends(tg_user)):
-    return {"cdn": cdn_on()}
+    c = cluster_conf()
+    return {"cdn": cdn_on(), "cluster": bool(c), "cluster_host": c["host"] if c else ""}
 
 
 @app.patch(P + "/api/settings")
-def api_settings_edit(body: dict, u=Depends(owner)):
+async def api_settings_edit(body: dict, u=Depends(owner)):
     if "cdn" in body:
         set_setting("cdn", "1" if body["cdn"] else "0")
-    return {"cdn": cdn_on()}
+    if "cluster" in body:
+        if body["cluster"]:
+            host = str(body.get("cluster_host") or setting("cluster_host", ""))
+            cluster_enable(host)
+        else:
+            set_setting("cluster", "0")
+        await sync_now()  # мосты принимают общие ключи или возвращают свои
+    c = cluster_conf()
+    return {"cdn": cdn_on(), "cluster": bool(c), "cluster_host": c["host"] if c else ""}
 
 
 @app.post(P + "/api/sync")
