@@ -30,6 +30,7 @@ BASE = os.environ.get("XVPN_AGENT_DIR", "/opt/xvpn/agent")
 NODE_FILE = os.path.join(BASE, "node.json")
 USERS_FILE = os.path.join(BASE, "users.json")
 UPSTREAMS_FILE = os.path.join(BASE, "upstreams.json")
+EXIT_DOMAINS_FILE = os.path.join(BASE, "exit_domains.json")
 XRAY_BIN = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
 XRAY_CONFIG = os.environ.get("XRAY_CONFIG", "/usr/local/etc/xray/config.json")
 XRAY_SERVICE = os.environ.get("XRAY_SERVICE", "xray")
@@ -77,8 +78,16 @@ def _common(node: dict) -> dict:
     }
 
 
+def load_exit_domains() -> list[str]:
+    if os.path.exists(EXIT_DOMAINS_FILE):
+        with open(EXIT_DOMAINS_FILE) as f:
+            return json.load(f)
+    return []
+
+
 def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
     r = node["reality"]
+    exit_domains = load_exit_domains()
     vision = [{"id": u["uuid"], "email": u["email"], "flow": "xtls-rprx-vision"} for u in users]
     exits = []
     by_srv: dict[str, list[str]] = {}  # теги exit-<id>-x|t, сгруппированные по серверу
@@ -100,6 +109,10 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
             last["outboundTag"] = exits[0]["tag"]
     else:
         last["balancerTag"] = f"exits-{srv_ids[0]}"
+    forced = []  # заблокированные сайты в .ru: только через выход, раньше правила «РФ напрямую»
+    if exit_domains and exits:
+        forced = [{"type": "field", "domain": exit_domains,
+                   **{k: v for k, v in last.items() if k in ("outboundTag", "balancerTag")}}]
     # распределение пользователей по выходам: панель закрепляет каждый ключ за своим
     # сервером (по реальной нагрузке, липко); без привязки — по номеру ключа,
     # при падении сервера группа уходит на соседний
@@ -131,10 +144,13 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
         ],
         "outbounds": exits + [{"tag": "direct", "protocol": "freedom"},
                               {"tag": "block", "protocol": "blackhole"}],
-        "routing": {"domainStrategy": "IPIfNonMatch", "rules": [
+        # AsIs: мост не резолвит чужие домены, иначе DNS хостера в РФ видит их все,
+        # а подменённый ответ на заблокированный сайт уводит его в «РФ напрямую»
+        "routing": {"domainStrategy": "AsIs", "rules": [
             {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
             {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
             {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
+            *forced,
             {"type": "field", "domain": RU_DOMAINS, "outboundTag": "direct"},
             {"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"},
             *user_rules,
@@ -323,6 +339,9 @@ def sync(body: dict):
     keys_changed = False
     if "cluster" in body:
         keys_changed = apply_cluster(body["cluster"])
+    if "exit_domains" in body:
+        with open(EXIT_DOMAINS_FILE, "w") as f:
+            json.dump(body["exit_domains"], f)
     changed = apply_users(body.get("users", []), body.get("upstreams"))
     return {"ok": True, "changed": changed or keys_changed}
 
@@ -365,7 +384,8 @@ def exits_health() -> list[dict]:
 def status():
     vm = psutil.virtual_memory()
     du = psutil.disk_usage("/")
-    net = psutil.net_io_counters()
+    # только внешние интерфейсы: на выходах весь трафик ещё раз идёт через lo (nginx ↔ Xray)
+    nics = [n for name, n in psutil.net_io_counters(pernic=True).items() if name != "lo"]
     active = run(["systemctl", "is-active", XRAY_SERVICE]).stdout.strip()
     ver = run([XRAY_BIN, "version"]).stdout.split("\n")[0]
     users = []
@@ -381,7 +401,7 @@ def status():
         "load": os.getloadavg(),
         "ram": {"used": vm.total - vm.available, "total": vm.total},
         "disk": {"used": du.used, "total": du.total},
-        "net": {"sent": net.bytes_sent, "recv": net.bytes_recv},
+        "net": {"sent": sum(n.bytes_sent for n in nics), "recv": sum(n.bytes_recv for n in nics)},
         "uptime": int(time.time() - psutil.boot_time()),
         "xray": {"active": active == "active", "version": ver, "users": len(users)},
     }

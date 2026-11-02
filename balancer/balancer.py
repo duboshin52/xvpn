@@ -49,6 +49,7 @@ HARD_CAP = int(float(conf.get("HARD_CAP_GB", 1800)) * 1024**3)
 PAIR = int(conf.get("PAIR", 2))
 RESET_DAY = int(conf.get("RESET_DAY", 1))
 ROTATE_DAYS = int(conf.get("ROTATE_DAYS", 0))
+EXCLUDE = {x.strip() for x in conf.get("EXCLUDE", "").split(",") if x.strip()}  # id или имена, не выходы каскада
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 API = f"http://127.0.0.1:8080/{PANEL_PATH}/api"
@@ -98,15 +99,17 @@ def main():
     state.setdefault("month", month)
 
     ov = api("GET", "/overview")
-    pool = [s for s in ov["servers"] if s["role"] == "exit" and s.get("enabled", 1)]
+    exits = [s for s in ov["servers"] if s["role"] == "exit" and s.get("enabled", 1)]
+    excluded = [s for s in exits if str(s["id"]) in EXCLUDE or s["name"] in EXCLUDE]
+    pool = [s for s in exits if s not in excluded]
 
-    # дельты трафика с прошлого запуска
+    # дельты трафика с прошлого запуска; считаем как хостер — только исходящий
     for s in pool:
         sid = str(s["id"])
         st = s.get("status") or {}
         if not (s.get("online") and st.get("xray", {}).get("active") and st.get("net")):
             continue
-        now = int(st["net"]["sent"]) + int(st["net"]["recv"])
+        now = int(st["net"]["sent"])
         prev = net.get(sid)
         if prev is not None and now >= prev:
             served[sid] = served.get(sid, 0) + (now - prev)
@@ -132,37 +135,53 @@ def main():
     for s in working:  # подстраховка для старых состояний без since
         since.setdefault(str(s["id"]), int(time.time()))
 
+    for s in excluded:  # главный и другие служебные ноды не работают выходами
+        if s.get("cascade") and working:
+            set_cascade(s, 0)
+            notify(f"⏸ Балансировщик: {s['name']} исключён из выходов каскада (EXCLUDE).")
+
+    def spare(limit):
+        """Отдыхающие выходы, которым ещё можно работать, начиная с самого свежего."""
+        return sorted((r for r in pool if not r.get("cascade") and served.get(str(r["id"]), 0) < limit),
+                      key=lambda r: served.get(str(r["id"]), 0))
+
     # страховка: жёсткий лимит — выключить, пока есть чем заменить
+    alerted = state.setdefault("cap_alerted", {})
     for s in list(working):
         sid = str(s["id"])
-        if served.get(sid, 0) >= HARD_CAP and len(working) > 1:
+        if served.get(sid, 0) < HARD_CAP:
+            alerted.pop(sid, None)
+        elif len(working) > 1 or spare(HARD_CAP):
             set_cascade(s, 0)
             working.remove(s)
             notify(f"⛔️ Балансировщик: {s['name']} достиг жёсткого лимита {gb(HARD_CAP)} — отключён от каскада до конца месяца.")
+        elif sid not in alerted:
+            alerted[sid] = int(time.time())
+            notify(f"🚨 Балансировщик: {s['name']} выше жёсткого лимита {gb(HARD_CAP)}, а заменить его нечем. Он работает дальше!")
 
-    # плановая ротация по LIMIT_GB
+    # плановая ротация по LIMIT_GB: только если есть замена, иначе всё сойдётся на одном выходе
     for s in list(working):
         sid = str(s["id"])
-        if served.get(sid, 0) >= LIMIT and len(working) > 1:
+        if served.get(sid, 0) >= LIMIT and spare(LIMIT):
             set_cascade(s, 0)
             working.remove(s)
             notify(f"🔄 Балансировщик: {s['name']} отдал {gb(served[sid])} — уходит на отдых.")
 
-    # ротация по времени: размывает привычную картину «одни и те же IP месяцами»
-    if ROTATE_DAYS > 0:
-        for s in list(working):
-            sid = str(s["id"])
-            age_days = (int(time.time()) - since.get(sid, int(time.time()))) / 86400
-            if age_days >= ROTATE_DAYS and len(working) > 1 and \
-                    any(served.get(str(r["id"]), 0) < LIMIT
-                        for r in pool if not r.get("cascade")):
-                set_cascade(s, 0)
-                working.remove(s)
-                notify(f"🕐 Балансировщик: {s['name']} работал {int(age_days)} дн. — плановая смена выхода.")
+    # ротация по времени: размывает привычную картину «одни и те же IP месяцами».
+    # По одному выходу в сутки: иначе вся группа сменится разом и порвёт всем соединения
+    just_rested = None
+    if ROTATE_DAYS > 0 and time.time() - state.get("last_rotate", 0) >= 86400 and spare(LIMIT) and working:
+        s = min(working, key=lambda w: since.get(str(w["id"]), int(time.time())))
+        age_days = (int(time.time()) - since.get(str(s["id"]), int(time.time()))) / 86400
+        if age_days >= ROTATE_DAYS:
+            set_cascade(s, 0)
+            working.remove(s)
+            just_rested = s
+            state["last_rotate"] = int(time.time())
+            notify(f"🕐 Балансировщик: {s['name']} работал {int(age_days)} дн. — плановая смена выхода.")
 
-    # добираем рабочую пару из самых отдохнувших
-    resting = [s for s in pool if not s.get("cascade") and served.get(str(s["id"]), 0) < LIMIT]
-    resting.sort(key=lambda s: served.get(str(s["id"]), 0))
+    # добираем рабочую группу из самых отдохнувших; если под LIMIT никого нет — из тех, кто под HARD_CAP
+    resting = [s for s in (spare(LIMIT) or spare(HARD_CAP)) if s is not just_rested]
     target = min(PAIR, len(pool))
     while len(working) < target and resting:
         s = resting.pop(0)

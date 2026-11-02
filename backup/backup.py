@@ -79,8 +79,10 @@ def make_archive() -> str:
 
 
 def rotate():
+    if KEEP <= 0:  # 0 — не удалять старые
+        return
     archives = sorted(glob.glob(os.path.join(OUT_DIR, "xvpn-backup-*.tar.gz")))
-    for old in archives[:-KEEP] if KEEP > 0 else archives:
+    for old in archives[:-KEEP]:
         try:
             os.unlink(old)
             print(f"удалён старый архив: {old}")

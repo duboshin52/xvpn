@@ -8,6 +8,7 @@ POST / {"user": "...", "old": "...", "new": "..."} -> {"ok": true} | {"ok": fals
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -24,14 +25,14 @@ def verify(user: str, password: str) -> bool:
 
 
 def update_env(user: str, password: str) -> None:
-    """Обновить WA_USER/WA_PASS в webadmin.env, если файл есть."""
+    """Обновить WA_USER/WA_PASS в webadmin.env, если файл есть. Файл читают через source."""
     try:
         if not os.path.exists(ENV_FILE):
             return
         with open(ENV_FILE, encoding="utf-8") as f:
             s = f.read()
-        s = re.sub(r"^WA_USER=.*$", "WA_USER='%s'" % user, s, flags=re.M)
-        s = re.sub(r"^WA_PASS=.*$", "WA_PASS='%s'" % password, s, flags=re.M)
+        s = re.sub(r"^WA_USER=.*$", lambda _: "WA_USER=%s" % shlex.quote(user), s, flags=re.M)
+        s = re.sub(r"^WA_PASS=.*$", lambda _: "WA_PASS=%s" % shlex.quote(password), s, flags=re.M)
         with open(ENV_FILE, "w", encoding="utf-8") as f:
             f.write(s)
         os.chmod(ENV_FILE, 0o600)

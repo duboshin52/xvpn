@@ -67,6 +67,7 @@ read_pem() { # read_pem файл "что вставить"
 # Запуск одной командой через curl: скачиваем исходники из репозитория и перезапускаемся из них
 REPO="${XVPN_REPO:-duboshin52/xvpn}"
 BRANCH="${XVPN_BRANCH:-main}"
+XRAY_VERSION="${XRAY_VERSION:-v26.10.31}"
 if [[ ! -f "$SRC/agent/agent.py" ]]; then
   command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl; }
   c "Скачиваю xvpn из github.com/$REPO ($BRANCH)…"
@@ -174,12 +175,12 @@ install_packages() {
 }
 
 install_xray() {
-  c "Xray-core (официальный установщик XTLS)…"
+  c "Xray-core $XRAY_VERSION (официальный установщик XTLS)…"
   local inst
   inst=$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) \
     || die "Не удалось скачать установщик Xray"
   # установщик XTLS может вернуть ненулевой код и при успехе — проверяем результат сами
-  bash -c "$inst" @ install >>/var/log/xvpn-install.log 2>&1 || true
+  bash -c "$inst" @ install --version "$XRAY_VERSION" >>/var/log/xvpn-install.log 2>&1 || true
   bash -c "$inst" @ install-geodata >>/var/log/xvpn-install.log 2>&1 || true
   [[ -x /usr/local/bin/xray ]] || die "Xray не установился, см. /var/log/xvpn-install.log"
   if [[ ! -s /usr/local/share/xray/geoip.dat ]]; then
@@ -191,6 +192,32 @@ install_xray() {
   fi
   [[ -s /usr/local/share/xray/geoip.dat ]] || die "Не скачался geoip.dat"
   ok "$(/usr/local/bin/xray version 2>/dev/null | sed -n 1p)"
+}
+
+# geoip.dat устаревает, а правило «РФ напрямую» на нём держится: раз в неделю свежая база
+install_geodata_timer() {
+  cat >/etc/systemd/system/xvpn-geodata.service <<'EOF'
+[Unit]
+Description=xvpn geodata update
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'cd /usr/local/share/xray && for f in geoip geosite; do curl -fsSL -o $f.new https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f.dat && [ -s $f.new ] && mv $f.new $f.dat; done; rm -f *.new; /usr/local/bin/xray run -test -c /usr/local/etc/xray/config.json >/dev/null && systemctl restart xray'
+EOF
+  cat >/etc/systemd/system/xvpn-geodata.timer <<'EOF'
+[Unit]
+Description=xvpn geodata update (weekly)
+
+[Timer]
+OnCalendar=Sun 04:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now xvpn-geodata.timer >/dev/null 2>&1 || true
 }
 
 enable_bbr() {
@@ -210,8 +237,9 @@ setup_venv() { # dir requirements...
   "$dir/venv/bin/pip" install -q --upgrade pip
   "$dir/venv/bin/pip" install -q --upgrade "$@"
 }
-AGENT_DEPS=(fastapi "uvicorn[standard]" psutil)
-PANEL_DEPS=(fastapi "uvicorn[standard]" httpx "aiogram>=3.7,<4")
+# версии закреплены: обновление не должно приносить на все серверы то, что вышло вчера
+AGENT_DEPS=(fastapi==0.162.0 "uvicorn[standard]==0.54.0" psutil==7.2.2)
+PANEL_DEPS=(fastapi==0.162.0 "uvicorn[standard]==0.54.0" httpx==0.28.1 aiogram==3.31.0)
 
 copy_code() {
   mkdir -p "$ROOT/agent" "$ROOT/panel/webapp"
@@ -356,7 +384,7 @@ agent_tls_cert() {
   [[ -s "$ETC/agent-cert.pem" ]] && return 0
   local san="IP:$SERVER_IP"
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
-    -keyout "$ETC/agent-key.pem" -out "$ETC/agent-cert.pem" -subj "/CN=xvpn-agent" \
+    -keyout "$ETC/agent-key.pem" -out "$ETC/agent-cert.pem" -subj "/CN=localhost" \
     -addext "subjectAltName=$san" 2>/dev/null
   chmod 600 "$ETC/agent-key.pem"
 }
@@ -698,8 +726,16 @@ open_firewall() {
   ufw allow 22/tcp >/dev/null  # не потерять SSH
   ufw allow 443/tcp >/dev/null
   [[ -n "${DOMAIN:-}" || -n "${ORIGIN_HOST:-}" ]] && ufw allow 80/tcp >/dev/null
-  # порт агента защищён секретом и TLS; лучше потом сузить до IP главного сервера
-  [[ "${AGENT_MODE:-}" == tls ]] && ufw allow "$AGENT_PORT"/tcp >/dev/null
+  # порт агента открыт только главному: MAIN_IP из окружения или уже настроенное правило.
+  # Правило «всем» ставим лишь при первой установке, когда адрес главного ещё неизвестен
+  if [[ "${AGENT_MODE:-}" == tls ]]; then
+    if [[ -n "${MAIN_IP:-}" ]]; then
+      ufw allow from "$MAIN_IP" to any port "$AGENT_PORT" proto tcp >/dev/null
+    elif ! ufw status | grep -qE "^$AGENT_PORT(/tcp)?[[:space:]]+ALLOW[[:space:]]+[0-9]"; then
+      ufw allow "$AGENT_PORT"/tcp >/dev/null
+      warn "Порт $AGENT_PORT открыт всем. Сузьте: ufw allow from IP_ГЛАВНОГО to any port $AGENT_PORT proto tcp; ufw delete allow $AGENT_PORT/tcp"
+    fi
+  fi
   ok "ufw: открыты 443$([[ -n "${DOMAIN:-}" ]] && echo ', 80')$([[ "${AGENT_MODE:-}" == tls ]] && echo ", $AGENT_PORT")"
 }
 
@@ -783,8 +819,14 @@ do_uninstall() {
   backup
   c "Удаляю xvpn…"
   local u
-  for u in xvpn-panel xvpn-agent xray xvpn-backup.timer xvpn-balancer.timer xvpn-canary.timer; do systemctl disable --now "$u" >/dev/null 2>&1 || true; done
-  rm -rf /etc/systemd/system/xvpn-panel.service /etc/systemd/system/xvpn-agent.service \
+  for u in xvpn-panel xvpn-agent xray xvpn-backup.timer xvpn-balancer.timer xvpn-canary.timer xvpn-geodata.timer \
+           xvpn-webadmin-passwd xvpn-webtunnel; do systemctl disable --now "$u" >/dev/null 2>&1 || true; done
+  # веб-панель: в её конфиге nginx лежит CLI-токен, оставлять нельзя
+  rm -f /etc/nginx/sites-enabled/xvpn-webadmin /etc/nginx/sites-available/xvpn-webadmin
+  rm -rf /opt/xvpn-webadmin /etc/xvpn-webadmin
+  rm -rf /etc/systemd/system/xvpn-webadmin-passwd.service /etc/systemd/system/xvpn-webtunnel.service \
+         /etc/systemd/system/xvpn-geodata.service /etc/systemd/system/xvpn-geodata.timer \
+         /etc/systemd/system/xvpn-panel.service /etc/systemd/system/xvpn-agent.service \
          /etc/systemd/system/xvpn-backup.service /etc/systemd/system/xvpn-backup.timer \
          /etc/systemd/system/xvpn-balancer.service /etc/systemd/system/xvpn-balancer.timer \
          /etc/systemd/system/xvpn-canary.service /etc/systemd/system/xvpn-canary.timer \
@@ -923,6 +965,7 @@ do_bridge() {
   setup_venv "$ROOT/agent" "${AGENT_DEPS[@]}"
   write_agent_service
   bootstrap_xray
+  install_geodata_timer
   open_firewall
   systemctl daemon-reload
   systemctl enable --now xvpn-agent >/dev/null 2>&1; systemctl restart xvpn-agent
@@ -952,6 +995,7 @@ do_update() {
   [[ -f "$ETC/panel.env" ]] && { setup_venv "$ROOT/panel" "${PANEL_DEPS[@]}"; write_panel_service; }
   write_agent_service
   [[ "$ROLE" == bridge ]] || write_nginx
+  [[ "$ROLE" == bridge ]] && install_geodata_timer
   open_firewall
   dns64_off
   systemctl daemon-reload
@@ -1063,7 +1107,7 @@ install_webadmin() {
   systemctl daemon-reload; systemctl enable --now xvpn-webadmin-passwd >/dev/null 2>&1
   [[ -s /etc/xvpn-webadmin/cert.pem ]] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -nodes -days 3650 -keyout /etc/xvpn-webadmin/key.pem -out /etc/xvpn-webadmin/cert.pem \
-    -subj "/CN=xvpn-panel" 2>/dev/null
+    -subj "/CN=localhost" 2>/dev/null
 
   local wa_pass wa_path
   wa_pass=$(rnd 12); wa_path="k-$(rnd 6)"

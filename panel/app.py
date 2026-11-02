@@ -8,6 +8,7 @@ import concurrent.futures
 import contextlib
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -44,6 +45,11 @@ WEBAPP_URL = f"https://{DOMAIN}{PANEL_PATH}/" if DOMAIN else ""
 HERE = os.path.dirname(os.path.abspath(__file__))
 GB = 1024 ** 3
 DAY = 86400
+OFFLINE_AFTER = 3  # столько синков подряд без ответа — нода считается недоступной
+REBALANCE_GAP = 6 * 3600  # автоматический переезд ключа — не чаще раза за столько секунд
+# заблокированные в РФ сайты в .ru: напрямую с моста они не откроются
+DEFAULT_EXIT_DOMAINS = ["domain:novayagazeta.ru", "domain:echo.msk.ru", "domain:grani.ru",
+                        "domain:tvrain.ru", "domain:ej.ru", "domain:kasparov.ru", "domain:rferl.ru"]
 
 # ---------------------------------------------------------------- DB
 _lock = threading.Lock()
@@ -66,6 +72,10 @@ for _c, _d in (("role", "TEXT DEFAULT 'exit'"), ("cert", "TEXT"), ("bridge_uuid"
                ("cascade", "INTEGER DEFAULT 1")):
     if _c not in _cols:
         db.execute(f"ALTER TABLE servers ADD COLUMN {_c} {_d}")
+# load_bytes — скользящая нагрузка ключа (затухает), used_bytes — накопленный трафик
+if "load_bytes" not in {r[1] for r in db.execute("PRAGMA table_info(keys)")}:
+    db.execute("ALTER TABLE keys ADD COLUMN load_bytes INTEGER DEFAULT 0")
+    db.execute("UPDATE keys SET load_bytes=used_bytes")
 if OWNER_ID:
     db.execute("INSERT OR IGNORE INTO admins(tg_id,name,is_owner) VALUES(?,?,1)", (OWNER_ID, "owner"))
 db.commit()
@@ -247,22 +257,29 @@ def server_links(srv: dict, k: dict, cdn_only: bool = False) -> list[str]:
     ]
 
 
-def cluster_link(cl: dict, k: dict) -> str:
+def cluster_link(cl: dict, k: dict, label: str = "Кластер RU") -> str:
     return (f"vless://{k['uuid']}@{cl['host']}:443?encryption=none&security=reality"
             f"&sni={cl['sni_tcp']}&fp=chrome&pbk={cl['public_key']}&sid={cl['short_id']}"
-            f"&type=tcp&flow=xtls-rprx-vision#{quote('Кластер RU | ' + k['name'])}")
+            f"&type=tcp&flow=xtls-rprx-vision#{quote(label + ' | ' + k['name'])}")
 
 
 def key_links(k: dict) -> list[str]:
     # В подписке — только каскад: прямые ссылки на выходы не светим,
     # чтобы клиенты не ходили мимо российских мостов (меньше поводов для блокировки).
     # Недоступные ноды (online=0 по итогам sync) из подписок убираем.
-    servers = q("SELECT * FROM servers WHERE enabled=1 AND online=1 ORDER BY role='bridge' DESC, id")
+    enabled = q("SELECT * FROM servers WHERE enabled=1 ORDER BY role='bridge' DESC, id")
+    servers = [s for s in enabled if s["online"]]
     cl = cluster_conf()
-    bridges = [s for s in servers if s["role"] == "bridge"]
-    if cl and len(bridges) >= 2:
+    # главный может не видеть мосты, когда клиенты их видят: online здесь не решает
+    all_bridges = [s for s in enabled if s["role"] == "bridge"]
+    bridges = [s for s in all_bridges if s["online"]] or all_bridges
+    if cl and len(all_bridges) >= 2:
         # кластер: одна ссылка на все мосты (DNS отдаёт адреса всех живых мостов)
         out = [cluster_link(cl, k)]
+        # запас на случай блокировки домена кластера: та же идентичность, вход по IP
+        ip = json.loads(bridges[0]["info"] or "{}").get("ip")
+        if ip:
+            out.append(cluster_link(cl | {"host": ip}, k, "Кластер RU запас"))
     elif bridges:
         out = [l for s in bridges for l in server_links(s, k)]
     else:
@@ -362,39 +379,59 @@ def exit_map_get() -> dict[int, int]:
         return {}
 
 
-def assign_exits(users: list[dict], sids: list[int]) -> list[dict]:
+def exit_pins_get() -> set[int]:
+    """Ключи, которым выход назначен вручную: автоматика их не двигает."""
+    try:
+        return {int(k) for k in json.loads(setting("exit_pins", "") or "[]")}
+    except (ValueError, TypeError):
+        return set()
+
+
+def exit_ids() -> list[int]:
+    return [s["id"] for s in q("SELECT id FROM servers WHERE role='exit' AND cascade=1 ORDER BY id")]
+
+
+def assign_exits(users: list[dict], sids: list[int]):
     """Умное закрепление ключей за выходами каскада: липко и по реальной нагрузке.
 
-    В отличие от деления по номеру ключа, новый ключ уходит на самый ненагруженный
-    выход (по сумме used_bytes закреплённых за ним ключей); при явном перекосе
-    один ключ за синк переезжает с самого нагруженного выхода на самый свободный.
+    Вызывается один раз за синк. Нагрузка — скользящая (keys.load_bytes), а каждый
+    ключ добавляет к выходу ещё 1 ГБ, иначе новые ключи с нулём трафика копятся
+    на одном выходе. Переезд при перекосе — не чаще раза в REBALANCE_GAP и только
+    если он реально уменьшает максимум: так ключ не прыгает туда-обратно
+    (каждый переезд перезапускает Xray на мостах и рвёт соединения).
     Привязки хранятся в settings.exit_map: {id ключа: id выхода}."""
     if not sids:
-        return users
+        return
     m = exit_map_get()
+    pins = exit_pins_get()
     kids = {int(u["email"][1:]) for u in users
             if u.get("email", "").startswith("k") and u["email"][1:].isdigit()}
+    old = dict(m)
     m = {k: v for k, v in m.items() if k in kids and v in sids}
-    used = {r["id"]: r["used_bytes"] for r in q("SELECT id, used_bytes FROM keys")}
+    weight = {r["id"]: r["load_bytes"] for r in q("SELECT id, load_bytes FROM keys")}
 
     def load(sid: int) -> int:
-        return sum(used.get(k, 0) for k, v in m.items() if v == sid)
+        return sum(weight.get(k, 0) + GB for k, v in m.items() if v == sid)
 
-    changed = False
-    for kid in kids - set(m):
+    for kid in sorted(kids - set(m)):
         m[kid] = min(sids, key=lambda s: (load(s), sids.index(s)))
-        changed = True
-    if len(sids) > 1:
+    now = time.time()
+    if len(sids) > 1 and now - float(setting("exit_rebalance_ts", "0") or 0) >= REBALANCE_GAP:
         loads = {s: load(s) for s in sids}
         heavy, light = max(loads, key=loads.get), min(loads, key=loads.get)
-        # перекос больше чем вдвое и хотя бы на 20 ГБ — перекидываем самый лёгкий ключ
+        gap = loads[heavy] - loads[light]
+        # перекос больше чем вдвое и хотя бы на 20 ГБ; ключ тяжелее разрыва только поменяет выходы местами
         if loads[heavy] > 2 * loads[light] + 20 * GB:
-            cand = [k for k, v in m.items() if v == heavy]
+            cand = [k for k, v in m.items() if v == heavy and k not in pins and weight.get(k, 0) + GB < gap]
             if cand:
-                m[min(cand, key=lambda k: used.get(k, 0))] = light
-                changed = True
-    if changed:
+                m[min(cand, key=lambda k: abs(gap - 2 * (weight.get(k, 0) + GB)))] = light
+                set_setting("exit_rebalance_ts", str(int(now)))
+    if m != old:
         set_setting("exit_map", json.dumps(m))
+
+
+def with_exits(users: list[dict]) -> list[dict]:
+    m = exit_map_get()
     out = []
     for u in users:
         e = u.get("email", "")
@@ -405,11 +442,18 @@ def assign_exits(users: list[dict], sids: list[int]) -> list[dict]:
     return out
 
 
+def exit_domains() -> list[str]:
+    """Домены, которые мост всегда ведёт через выход: заблокированные сайты в .ru и т. п."""
+    try:
+        return json.loads(setting("exit_domains", "") or "null") or DEFAULT_EXIT_DOMAINS
+    except ValueError:
+        return DEFAULT_EXIT_DOMAINS
+
+
 def sync_body(srv: dict, users: list[dict]) -> dict:
     if srv["role"] == "bridge":
         c = cluster_conf()
-        sids = [s["id"] for s in q("SELECT id FROM servers WHERE role='exit' AND cascade=1 ORDER BY id")]
-        return {"users": assign_exits(users, sids), "upstreams": exit_upstreams(srv),
+        return {"users": with_exits(users), "upstreams": exit_upstreams(srv), "exit_domains": exit_domains(),
                 "cluster": {k: c[k] for k in ("private_key", "public_key", "short_id", "sni_tcp")} if c else None}
     return {"users": users + bridge_users()}
 
@@ -420,7 +464,8 @@ async def sync_server(srv: dict, users: list[dict]):
     for email, t in st["users"].items():
         total = t["up"] + t["down"]
         if total and email.startswith("k") and email[1:].isdigit():
-            qx("UPDATE keys SET used_bytes=used_bytes+?, last_active=? WHERE id=?", (total, now, int(email[1:])))
+            qx("UPDATE keys SET used_bytes=used_bytes+?, load_bytes=load_bytes+?, last_active=? WHERE id=?",
+               (total, total, now, int(email[1:])))
     await agent(srv, "POST", "/sync", sync_body(srv, users), timeout=40)
     status = await agent(srv, "GET", "/status")
     with contextlib.suppress(Exception):
@@ -433,21 +478,28 @@ async def sync_all():
     # синхронизируем все ноды: скрытая из подписок нода может работать выходом для моста
     servers = q("SELECT * FROM servers")
     users = active_users()
+    # нагрузка затухает с полупериодом около 3 суток
+    if time.time() - _load_decay["t"] >= 3600:
+        _load_decay["t"] = time.time()
+        qx("UPDATE keys SET load_bytes=CAST(load_bytes*0.99 AS INTEGER)")
+    assign_exits(users, exit_ids())
     res = await asyncio.gather(*(sync_server(s, users) for s in servers), return_exceptions=True)
     for s, r in zip(servers, res):
         ok = not isinstance(r, Exception)
         if not ok:
             log.warning("sync %s failed: %r", s["name"], r)
-        if bool(s["online"]) != ok:
+        # один сбой синка — ещё не падение: online влияет на подписки и алерты
+        _sync_fails[s["id"]] = 0 if ok else _sync_fails.get(s["id"], 0) + 1
+        if ok != bool(s["online"]) and (ok or _sync_fails[s["id"]] >= OFFLINE_AFTER):
             qx("UPDATE servers SET online=? WHERE id=?", (int(ok), s["id"]))
-            await notify_admins(f"{'✅' if ok else '🔴'} Сервер <b>{s['name']}</b> "
+            await notify_admins(f"{'✅' if ok else '🔴'} Сервер <b>{esc(s['name'])}</b> "
                                 f"{'снова в строю' if ok else 'недоступен'}")
     # после сбора статистики — проверить лимиты/сроки, уведомить и переотправить
     newly_off = [k for k in q("SELECT * FROM keys WHERE notified=0")
                  if key_state(k) in ("expired", "limit")]
     for k in newly_off:
         qx("UPDATE keys SET notified=1 WHERE id=?", (k["id"],))
-        await notify_admins(f"⛔ Ключ <b>{k['name']}</b> отключён: "
+        await notify_admins(f"⛔ Ключ <b>{esc(k['name'])}</b> отключён: "
                             f"{'истёк срок' if key_state(k) == 'expired' else 'исчерпан трафик'}")
     if newly_off:
         users = active_users()
@@ -456,6 +508,8 @@ async def sync_all():
 
 
 _sync_lock = asyncio.Lock()
+_sync_fails: dict[int, int] = {}
+_load_decay = {"t": time.time()}
 
 
 async def sync_now():
@@ -479,6 +533,11 @@ dp = Dispatcher()
 
 def is_admin(uid: int) -> dict | None:
     return q("SELECT * FROM admins WHERE tg_id=?", (uid,), one=True)
+
+
+def esc(s) -> str:
+    """Экранирование для parse_mode=HTML: символ < в имени ломает всё сообщение."""
+    return html.escape(str(s), quote=False)
 
 
 async def notify_admins(text: str):
@@ -568,11 +627,13 @@ async def cmd_newkey(m: Message, command: CommandObject):
     k = key_out(create_key(args[0], days, gb, m.from_user.id))
     asyncio.create_task(sync_now())
     if k["sub_url"]:
-        ru = f"\nЗапасная (через РФ-CDN):\n<code>{k['sub_url_ru']}</code>" if k.get("sub_url_ru") else ""
-        return await m.answer(f"Ключ <b>{k['name']}</b> создан.\nПодписка:\n<code>{k['sub_url']}</code>{ru}",
+        # основная — через РФ-CDN: Cloudflare у части операторов РФ заблокирован
+        main_url, spare = (k["sub_url_ru"], k["sub_url"]) if k.get("sub_url_ru") else (k["sub_url"], "")
+        ru = f"\nЗапасная (Cloudflare):\n<code>{spare}</code>" if spare else ""
+        return await m.answer(f"Ключ <b>{esc(k['name'])}</b> создан.\nПодписка:\n<code>{main_url}</code>{ru}",
                               parse_mode="HTML")
-    links = "\n\n".join(f"<code>{l}</code>" for l in key_links(k))
-    await m.answer(f"Ключ <b>{k['name']}</b> создан.\n\n{links or 'Серверов пока нет'}", parse_mode="HTML")
+    links = "\n\n".join(f"<code>{esc(l)}</code>" for l in key_links(k))
+    await m.answer(f"Ключ <b>{esc(k['name'])}</b> создан.\n\n{links or 'Серверов пока нет'}", parse_mode="HTML")
 
 
 @dp.message(Command("admins"))
@@ -760,15 +821,19 @@ async def api_key_exit(kid: int, body: dict, u=Depends(tg_user)):
         raise HTTPException(404, "нет такого ключа")
     sid = body.get("exit")
     m = exit_map_get()
+    pins = exit_pins_get()
     if sid is None:
         m.pop(kid, None)
+        pins.discard(kid)
     else:
         ok = q("SELECT 1 AS x FROM servers WHERE id=? AND role='exit' AND cascade=1 AND enabled=1",
                (int(sid),), one=True)
         if not ok:
             raise HTTPException(400, "такого активного выхода каскада нет")
         m[kid] = int(sid)
+        pins.add(kid)
     set_setting("exit_map", json.dumps(m))
+    set_setting("exit_pins", json.dumps(sorted(pins)))
     await sync_now()
     return {"ok": True, "exit": sid}
 
@@ -915,6 +980,9 @@ async def api_settings_edit(body: dict, u=Depends(owner)):
         set_setting("cdn", "1" if body["cdn"] else "0")
     if "emergency" in body:
         set_setting("emergency", "1" if body["emergency"] else "0")
+    if "exit_domains" in body:
+        set_setting("exit_domains", json.dumps([str(d) for d in body["exit_domains"]]))
+        asyncio.create_task(sync_now())
     if "cluster" in body:
         if body["cluster"]:
             host = str(body.get("cluster_host") or setting("cluster_host", ""))

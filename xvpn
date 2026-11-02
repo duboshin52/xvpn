@@ -40,6 +40,7 @@ ${B}Серверы${N} (на главном сервере)
   xvpn cluster [on ДОМЕН|off]     кластер мостов: одна ссылка на все РФ-входы (домен с A-записями на мосты)
   xvpn rucdn [off]                вход через российский CDN (Yandex Cloud CDN и др.) на этом сервере
   xvpn sync                       синхронизировать сейчас
+  xvpn exitdomains ДОМЕН…         заменить список заблокированных .ru-сайтов, идущих через выход
 
 ${B}Этот сервер${N}
   xvpn status                     состояние сервисов (и сводка на главном)
@@ -234,6 +235,10 @@ case "$cmd" in
       *) die "xvpn server add|del|rename|cascade|hide|show" ;;
     esac ;;
   sync) need_main; api POST /sync >/dev/null; ok "Синхронизировано" ;;
+  exitdomains)
+    need_main; [[ $# -gt 0 ]] || die "xvpn exitdomains domain:site.ru [domain:другой.ru …]"
+    api PATCH /settings "$(jq -nc '{exit_domains:$ARGS.positional}' --args "$@")" >/dev/null
+    ok "Эти домены мосты теперь ведут через выход" ;;
   webadmin)
     if is_main; then
       # код для установки веб-панели на любом другом сервере (bash install.sh webadmin)

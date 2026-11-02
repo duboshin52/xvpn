@@ -50,6 +50,9 @@ API = f"http://127.0.0.1:8080/{panel.get('PANEL_PATH', '')}/api"
 
 CF_TOKEN = conf.get("CF_TOKEN", "")
 CF_ZONE = conf.get("CF_ZONE", "")
+HEARTBEAT_URL = conf.get("HEARTBEAT_URL", "")  # внешний сторож: молчание = главный умер
+DEAD_AFTER = int(conf.get("DEAD_AFTER", 3))    # столько прогонов подряд IP мёртв — можно удалять
+MIN_DNS = int(conf.get("MIN_DNS", 2))          # меньше стольких A-записей автоматика не оставит
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 
@@ -116,14 +119,18 @@ def cf_api(method, path, body=None):
 
 
 def cf_fix_dns(host: str, dead: list[str]) -> str:
-    """Удаляет A-записи кластера, указывающие на мёртвые IP. Возвращает отчёт."""
+    """Удаляет не больше одной мёртвой A-записи за прогон, оставляя минимум MIN_DNS.
+
+    Проверка идёт с одной точки: если все мосты разом «мертвы», вероятнее сбой
+    у главного или на маршруте, а клиенты в это время могут работать."""
     recs = cf_api("GET", f"/zones/{CF_ZONE}/dns_records?type=A&name={host}") or []
-    done = []
+    if len(recs) - 1 < MIN_DNS:
+        return ""
     for r in recs:
         if r["content"] in dead:
             cf_api("DELETE", f"/zones/{CF_ZONE}/dns_records/{r['id']}")
-            done.append(r["content"])
-    return ", ".join(done)
+            return r["content"]
+    return ""
 
 
 def http_status(url: str, timeout=10) -> int:
@@ -159,7 +166,21 @@ def main():
             notify(f"🟢 Канарейка: восстановилось — {name}")
             fails.pop(name, None)
 
-    ov = api("GET", "/overview")
+    def save():
+        state["ts"] = int(time.time())
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, STATE_FILE)
+
+    try:
+        ov = api("GET", "/overview")
+    except Exception as e:
+        # панель лежит: остальные проверки невозможны, но молчать нельзя
+        report("panel", f"панель главного сервера не отвечает: {type(e).__name__}: {e}")
+        save()
+        return
+    report("panel", None)
     servers = ov.get("servers") or []
     cl = ov.get("cluster")
     now = int(time.time())
@@ -172,6 +193,11 @@ def main():
         up = bool(s.get("online") and (s.get("status") or {}).get("xray", {}).get("active"))
         report(f"node:{s['id']}", None if up else
                f"нода «{s['name']}» ({s['role']}) не на связи или Xray лёг")
+        # путь мост → выход: сервер может быть жив, а маршрут из РФ к нему закрыт
+        for e in (s.get("status") or {}).get("exits") or []:
+            if up:
+                report(f"path:{s['id']}:{e['tag']}", None if e.get("alive") else
+                       f"мост «{s['name']}» не видит выход {e.get('name', e['tag'])} ({e.get('proto', '?')})")
 
     # 2. маскировка мостов: TLS с SNI кластера (или собственным) должен вернуть
     #    валидный сертификат маскировочного сайта
@@ -208,16 +234,21 @@ def main():
             report("dns:missing", None)
         # мёртвые IP в DNS: не принадлежат живым мостам и не отвечают по маскировке
         suspicious = []
+        strikes = state.setdefault("dead", {})  # ip -> сколько прогонов подряд мёртв
         for ip in got - live:
             ok, _ = tls_cert_ok(ip, cl_sni or "ya.ru")
             mask[ip] = {"ok": ok, "ts": now}
             if not ok:
                 suspicious.append(ip)
+        state["dead"] = strikes = {ip: strikes.get(ip, 0) + 1 for ip in suspicious}
         if suspicious:
             fixed = ""
-            if CF_TOKEN and CF_ZONE and not DRY_RUN:
+            ripe = [ip for ip in suspicious if strikes[ip] >= DEAD_AFTER]
+            # мертвы все адреса — это не мосты упали, а связь главного: DNS не трогаем
+            if ripe and len(suspicious) < len(got) and CF_TOKEN and CF_ZONE and not DRY_RUN:
                 try:
-                    fixed = " Автоматически убрал из DNS: " + cf_fix_dns(host, suspicious)
+                    gone = cf_fix_dns(host, ripe)
+                    fixed = f" Автоматически убрал из DNS: {gone}" if gone else ""
                 except Exception as e:
                     fixed = f" Автоудаление не сработало: {e}"
             report("dns:dead",
@@ -231,7 +262,6 @@ def main():
         st = http_status(f"https://{DOMAIN}{SUB_PATH}/canary")
         report("sub:main", None if st in (400, 401, 403, 404) else
                f"подписка https://{DOMAIN} не отвечает (код {st})")
-        ru = ((ov.get("servers") or [{}])[0].get("info") or {})  # ищем РФ-CDN у локальной ноды
         rc_host = ""
         for s in servers:
             rc = (s.get("info") or {}).get("ru_cdn") or {}
@@ -243,11 +273,12 @@ def main():
             report("sub:rucdn", None if st in (400, 401, 403, 404) else
                    f"подписка через РФ-CDN ({rc_host}) не отвечает (код {st})")
 
-    state["ts"] = now
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, STATE_FILE)
+    save()
+    if HEARTBEAT_URL and not DRY_RUN:
+        try:
+            urllib.request.urlopen(HEARTBEAT_URL, timeout=10).read()
+        except Exception as e:
+            print("heartbeat failed:", e)
     print("fails:", len(fails), "·", "; ".join(fails) if fails else "всё живо")
 
 
