@@ -40,6 +40,7 @@ ${B}Серверы${N} (на главном сервере)
   xvpn cluster [on ДОМЕН|off]     кластер мостов: одна ссылка на все РФ-входы (домен с A-записями на мосты)
   xvpn rucdn [off]                вход через российский CDN (Yandex Cloud CDN и др.) на этом сервере
   xvpn sync                       синхронизировать сейчас
+  xvpn mobile ИМЯ_МОСТА           мост для профиля «Мобильный» в подписке
   xvpn exitdomains ДОМЕН…         заменить список заблокированных .ru-сайтов, идущих через выход
 
 ${B}Этот сервер${N}
@@ -235,6 +236,10 @@ case "$cmd" in
       *) die "xvpn server add|del|rename|cascade|hide|show" ;;
     esac ;;
   sync) need_main; api POST /sync >/dev/null; ok "Синхронизировано" ;;
+  mobile)
+    need_main; [[ $# -gt 0 ]] || die "xvpn mobile ИМЯ_МОСТА (пустая строка — профиль через CDN)"
+    api PATCH /settings "$(jq -nc --arg n "$1" '{mobile_bridge:$n}')" >/dev/null
+    ok "Профиль «Мобильный»: ${1:-через CDN}" ;;
   exitdomains)
     need_main; [[ $# -gt 0 ]] || die "xvpn exitdomains domain:site.ru [domain:другой.ru …]"
     api PATCH /settings "$(jq -nc '{exit_domains:$ARGS.positional}' --args "$@")" >/dev/null

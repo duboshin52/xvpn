@@ -481,10 +481,15 @@ EOF
     source "$ETC/node.env"
   fi
   agent_tls_cert
+  local rucdn=null  # каскад через российский CDN: клиент → CDN_HOST → ORIGIN_HOST (этот мост) → выходы
+  if [[ -n "${CDN_HOST:-}" && -n "${ORIGIN_HOST:-}" ]]; then
+    rucdn=$(jq -nc --arg h "$CDN_HOST" --arg o "$ORIGIN_HOST" '{host:$h, origin:$o}')
+  fi
   mkdir -p "$ROOT/agent"
   jq -n --arg ip "$SERVER_IP" --arg s "$AGENT_SECRET" --arg pk "$REALITY_PRIV" --arg pub "$REALITY_PUB" \
         --arg sid "$SHORT_ID" --arg st "$SNI_TCP" --arg nm "$NODE_NAME" \
-    '{role:"bridge", name:$nm, ip:$ip, port:443, agent_secret:$s,
+        --arg xp "${XHTTP_PATH:-}" --argjson rc "$rucdn" \
+    '{role:"bridge", name:$nm, ip:$ip, port:443, agent_secret:$s, xhttp_path:$xp, ru_cdn:$rc,
       reality:{private_key:$pk, public_key:$pub, short_id:$sid, sni_tcp:$st}}' >"$ROOT/agent/node.json"
   chmod 600 "$ROOT/agent/node.json"
 }
@@ -1231,7 +1236,7 @@ do_rucdn() {
   [[ -f "$ETC/node.env" ]] || die "Сначала установите xvpn (server или node)"
   # shellcheck disable=SC1091
   source "$ETC/node.env"
-  [[ "${ROLE:-exit}" == exit ]] || die "Российский CDN подключают к серверу-выходу, а не к мосту"
+  [[ "${ROLE:-exit}" == exit ]] || { do_bridge_rucdn; return; }
   if [[ "${2:-}" == off || "${ARG2:-}" == off ]]; then
     set_env CDN_HOST ""; set_env ORIGIN_HOST ""
     configure_exit >/dev/null; write_nginx
@@ -1271,6 +1276,84 @@ do_rucdn() {
   echo
   echo "На главном сервере выполните «xvpn sync» — в подписках появятся ссылки «РФ-CDN»."
   echo "Проверка источника: curl -s -o /dev/null -w '%{http_code}\n' https://$ORIGIN_HOST$XHTTP_PATH/ (ждём 404 или 400)"
+}
+
+# Каскад через российский CDN: клиент → CDN → nginx моста (:CDN_ORIGIN_PORT) → Xray → выходы.
+# 443 занят Reality, поэтому у CDN-источника свой порт; nginx только для этого входа.
+do_bridge_rucdn() {
+  if [[ "${ARG2:-}" == off ]]; then
+    set_env CDN_HOST ""; set_env ORIGIN_HOST ""
+    rm -f /etc/nginx/sites-enabled/xvpn-bridge-cdn /etc/nginx/sites-available/xvpn-bridge-cdn
+    systemctl reload nginx 2>/dev/null || true
+    configure_bridge >/dev/null; systemctl restart xvpn-agent
+    ok "CDN на мосту выключен. На главном сервере: xvpn sync"
+    return
+  fi
+  c "Нужны DNS-запись источника на этот мост ($SERVER_IP, без прокси Cloudflare) и CDN-ресурс на него."
+  ask ORIGIN_HOST "Имя источника, например origin-ru1.ваш-домен" "${ORIGIN_HOST:-}"
+  ask CDN_HOST "Адрес CDN для клиентов, например cdn-ru1.ваш-домен" "${CDN_HOST:-}"
+  ask CDN_ORIGIN_PORT "Порт источника для CDN" "${CDN_ORIGIN_PORT:-8444}"
+  local got
+  got=$(getent ahostsv4 "$ORIGIN_HOST" | awk 'NR==1{print $1}')
+  [[ "$got" == "$SERVER_IP" ]] || die "$ORIGIN_HOST указывает на ${got:-ничто}, а должен на $SERVER_IP"
+  [[ -n "${XHTTP_PATH:-}" ]] || XHTTP_PATH="/$(rnd 10)"
+  set_env ORIGIN_HOST "$ORIGIN_HOST"; set_env CDN_HOST "$CDN_HOST"
+  set_env CDN_ORIGIN_PORT "$CDN_ORIGIN_PORT"; set_env XHTTP_PATH "$XHTTP_PATH"
+  apt-get install -y -qq nginx certbot >/dev/null
+  mkdir -p /var/www/xvpn-acme /var/www/xvpn
+  [[ -f /var/www/xvpn/index.html ]] || echo '<!doctype html><title>Welcome</title><h1>Coming soon</h1>' >/var/www/xvpn/index.html
+  rm -f /etc/nginx/sites-enabled/default
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow 80/tcp >/dev/null; ufw allow "$CDN_ORIGIN_PORT"/tcp >/dev/null
+  fi
+  local acme="server {
+    listen 80;
+    server_name $ORIGIN_HOST;
+    location /.well-known/acme-challenge/ { root /var/www/xvpn-acme; }
+    location / { return 404; }
+}"
+  echo "$acme" >/etc/nginx/sites-available/xvpn-bridge-cdn
+  ln -sf /etc/nginx/sites-available/xvpn-bridge-cdn /etc/nginx/sites-enabled/xvpn-bridge-cdn
+  nginx -t 2>&1 | tail -1; systemctl enable --now nginx >/dev/null 2>&1; systemctl reload nginx
+  if [[ ! -s "/etc/letsencrypt/live/$ORIGIN_HOST/fullchain.pem" ]]; then
+    certbot certonly --webroot -w /var/www/xvpn-acme -d "$ORIGIN_HOST" --non-interactive --agree-tos \
+      --register-unsafely-without-email --deploy-hook "systemctl reload nginx" \
+      || die "Let's Encrypt не выдал сертификат: проверьте порт 80 и запись без прокси"
+  fi
+  local le="/etc/letsencrypt/live/$ORIGIN_HOST"
+  cat >/etc/nginx/sites-available/xvpn-bridge-cdn <<EOF
+$acme
+server {
+    listen $CDN_ORIGIN_PORT ssl http2;
+    server_name $ORIGIN_HOST;
+    ssl_certificate     $le/fullchain.pem;
+    ssl_certificate_key $le/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /var/www/xvpn;
+    server_tokens off;
+
+    location $XHTTP_PATH/ {
+        client_max_body_size 0;
+        client_body_timeout 1h;
+        proxy_pass http://unix:/dev/shm/xvpn-xhttp.sock;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_set_header Host \$host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+    location / { try_files \$uri /index.html; }
+}
+EOF
+  nginx -t 2>&1 | tail -1; systemctl reload nginx
+  configure_bridge >/dev/null
+  systemctl restart xvpn-agent
+  ok "Мост готов принимать трафик от CDN: https://$ORIGIN_HOST:$CDN_ORIGIN_PORT$XHTTP_PATH/"
+  echo "Настройки CDN-ресурса: источник $ORIGIN_HOST, порт $CDN_ORIGIN_PORT, HTTPS, Host: $ORIGIN_HOST;"
+  echo "доменное имя $CDN_HOST с TLS-сертификатом, кеширование выключено, методы GET/HEAD/OPTIONS, сжатие выключено."
+  echo "На главном: xvpn sync — в подписках появится профиль «РФ-CDN мост»."
 }
 
 run_mode() {

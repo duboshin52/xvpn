@@ -53,6 +53,8 @@ CF_ZONE = conf.get("CF_ZONE", "")
 HEARTBEAT_URL = conf.get("HEARTBEAT_URL", "")  # внешний сторож: молчание = главный умер
 DEAD_AFTER = int(conf.get("DEAD_AFTER", 3))    # столько прогонов подряд IP мёртв — можно удалять
 MIN_DNS = int(conf.get("MIN_DNS", 2))          # меньше стольких A-записей автоматика не оставит
+PATH_AFTER = int(conf.get("PATH_AFTER", 3))    # столько прогонов подряд путь мёртв — алерт
+STALLED_LIMIT = int(conf.get("STALLED_LIMIT", 10))  # свежих рукопожатий без ответа на мосту — алерт
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 
@@ -185,6 +187,8 @@ def main():
     cl = ov.get("cluster")
     now = int(time.time())
     mask = state.setdefault("mask", {})  # ip -> {"ok": bool, "ts": ts} — маскировка по TLS
+    paths = state.setdefault("paths", {})  # мост:путь -> сколько прогонов подряд мёртв
+    stalls = state.setdefault("stalls", {})  # id моста -> сколько прогонов подряд выше порога
 
     # 1. живость нод
     for s in servers:
@@ -193,11 +197,24 @@ def main():
         up = bool(s.get("online") and (s.get("status") or {}).get("xray", {}).get("active"))
         report(f"node:{s['id']}", None if up else
                f"нода «{s['name']}» ({s['role']}) не на связи или Xray лёг")
-        # путь мост → выход: сервер может быть жив, а маршрут из РФ к нему закрыт
-        for e in (s.get("status") or {}).get("exits") or []:
-            if up:
-                report(f"path:{s['id']}:{e['tag']}", None if e.get("alive") else
-                       f"мост «{s['name']}» не видит выход {e.get('name', e['tag'])} ({e.get('proto', '?')})")
+        # рукопожатия без ответа: клиент «подключён», но интернета нет (молчит сайт маскировки)
+        stalled = (s.get("status") or {}).get("stalled")
+        if up and stalled is not None:
+            sid = str(s["id"])
+            stalls[sid] = stalls.get(sid, 0) + 1 if stalled >= STALLED_LIMIT else 0
+            report(f"stall:{sid}", f"на мосту «{s['name']}» {stalled} рукопожатий без ответа: "
+                                   f"клиенты подключены, но интернета нет. Похоже, молчит сайт маскировки"
+                   if stalls[sid] >= 2 else None)
+        # путь мост → выход: сервер может быть жив, а маршрут из РФ к нему закрыт.
+        # Единичные сбои одного из двух путей обычны: алерт — если путь мёртв PATH_AFTER
+        # прогонов подряд или мертвы оба пути к выходу два прогона (после рестарта замеров нет)
+        exits = (s.get("status") or {}).get("exits") or []
+        for e in exits if up else []:
+            key = f"{s['id']}:{e['tag']}"
+            dead = paths[key] = 0 if e.get("alive") else paths.get(key, 0) + 1
+            both = not any(x.get("alive") for x in exits if x.get("server_id") == e.get("server_id"))
+            report(f"path:{key}", f"мост «{s['name']}» не видит выход {e.get('name', e['tag'])} "
+                                  f"({e.get('proto', '?')})" if dead >= PATH_AFTER or (both and dead >= 2) else None)
 
     # 2. маскировка мостов: TLS с SNI кластера (или собственным) должен вернуть
     #    валидный сертификат маскировочного сайта
@@ -223,8 +240,9 @@ def main():
     if cl:
         host = cl.get("host", "")
         got = set(dns_addrs(host))
+        # мост профиля «Мобильный» намеренно вне DNS кластера: клиенты идут на его IP
         live = {s["info"]["ip"] for s in bridges
-                if s.get("online") and (s.get("info") or {}).get("ip")}
+                if s.get("online") and (s.get("info") or {}).get("ip") and s["name"] != ov.get("mobile_bridge")}
         missing = live - got
         if missing:
             report("dns:missing",

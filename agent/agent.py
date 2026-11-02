@@ -157,6 +157,16 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
             last,
         ]},
     }
+    if node.get("ru_cdn") and node.get("xhttp_path"):
+        # вход через российский CDN: клиент → CDN → nginx моста → этот сокет → выходы.
+        # Для сети клиента мост не виден: оператор видит только адрес CDN
+        cfg["inbounds"].append(
+            {"tag": "bridge-cdn", "listen": f"{XHTTP_SOCK},0666", "protocol": "vless",
+             "settings": {"clients": [{"id": u["uuid"], "email": u["email"]} for u in users], "decryption": "none"},
+             "streamSettings": {"network": "xhttp",
+                                "xhttpSettings": {"path": node["xhttp_path"], "mode": "auto",
+                                                  "uplinkDataPlacement": "auto"}},
+             "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True}})
     if exits:
         cfg["metrics"] = {"tag": "metrics", "listen": METRICS_ADDR}
         cfg["observatory"] = {"subjectSelector": ["exit-"], "probeURL": PROBE_URL,
@@ -298,6 +308,7 @@ def info():
     r = n["reality"]
     if role(n) == "bridge":
         return {"role": "bridge", "name": n.get("name", ""), "ip": n["ip"], "port": int(n.get("port", 443)),
+                "ru_cdn": n.get("ru_cdn"), "xhttp_path": n.get("xhttp_path"),
                 "reality": {"public_key": r["public_key"], "short_id": r["short_id"], "sni_tcp": r["sni_tcp"]}}
     return {
         "role": "exit", "name": n.get("name", ""), "ru_cdn": n.get("ru_cdn"),
@@ -380,6 +391,22 @@ def exits_health() -> list[dict]:
     return out
 
 
+def stalled_handshakes(port: int) -> int:
+    """Клиенты на входе, которые прислали рукопожатие и не получили ни байта.
+
+    Reality ждёт ответ маскировочного сайта: если тот молчит, клиент висит
+    «подключённым» без интернета. Берём только свежие (10 с — 5 мин): старые
+    зависшие соединения держатся часами и о текущем сбое не говорят."""
+    out = run(["ss", "-tinH", "state", "established", f"( sport = :{port} )"]).stdout
+    n = 0
+    for line in out.splitlines():
+        if "bytes_received:" in line and "bytes_sent:" not in line:
+            m = re.search(r"lastrcv:(\d+)", line)
+            if m and 10000 <= int(m.group(1)) <= 300000:
+                n += 1
+    return n
+
+
 @app.get("/status", dependencies=[Depends(auth)])
 def status():
     vm = psutil.virtual_memory()
@@ -396,6 +423,7 @@ def status():
     extra = {"role": role(node)}
     if role(node) == "bridge":
         extra["exits"] = exits_health()
+        extra["stalled"] = stalled_handshakes(int(node.get("port", 443)))
     return extra | {
         "cpu": psutil.cpu_percent(interval=0.3), "cores": psutil.cpu_count(),
         "load": os.getloadavg(),

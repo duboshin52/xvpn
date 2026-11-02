@@ -45,6 +45,9 @@ WEBAPP_URL = f"https://{DOMAIN}{PANEL_PATH}/" if DOMAIN else ""
 HERE = os.path.dirname(os.path.abspath(__file__))
 GB = 1024 ** 3
 DAY = 86400
+# fingerprint клиента на входе в мост: рукопожатие chrome больше одного TCP-пакета, и у части
+# клиентов вторая часть не доходит. ios с нашими мостами не работает (проверено 02.11)
+BRIDGE_FP = os.environ.get("BRIDGE_FP", "safari")
 OFFLINE_AFTER = 3  # столько синков подряд без ответа — нода считается недоступной
 REBALANCE_GAP = 6 * 3600  # автоматический переезд ключа — не чаще раза за столько секунд
 # заблокированные в РФ сайты в .ru: напрямую с моста они не откроются
@@ -214,6 +217,19 @@ def create_key(name: str, days: float, gb: float, by: int) -> dict:
     return q("SELECT * FROM keys WHERE id=?", (kid,), one=True)
 
 
+def ru_cdn_link(k: dict, info: dict, name: str) -> str:
+    """Ссылка через российский CDN: packet-up, отправка GET с данными в заголовках (POST там режут).
+
+    Пакеты до 1500 байт: крупнее не влезают в заголовки и получают 431."""
+    host = info["ru_cdn"]["host"]
+    extra = quote(json.dumps({"uplinkHTTPMethod": "GET", "uplinkDataPlacement": "header",
+                              "scMaxEachPostBytes": 1500, "scMinPostsIntervalMs": 10},
+                             separators=(",", ":")), safe="")
+    return (f"vless://{k['uuid']}@{host}:443?encryption=none&security=tls&sni={host}"
+            f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={host}"
+            f"&path={quote(info['xhttp_path'], safe='')}&mode=packet-up&extra={extra}#{name}")
+
+
 def server_links(srv: dict, k: dict, cdn_only: bool = False) -> list[str]:
     info = json.loads(srv["info"] or "{}")
     if not info:
@@ -223,20 +239,12 @@ def server_links(srv: dict, k: dict, cdn_only: bool = False) -> list[str]:
     h = f"[{info['ip']}]" if ":" in info["ip"] else info["ip"]  # IPv6 в ссылке — в скобках
     if info.get("role") == "bridge":
         return [f"vless://{u}@{h}:{info.get('port', 443)}?encryption=none&security=reality"
-                f"&sni={r['sni_tcp']}&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}"
+                f"&sni={r['sni_tcp']}&fp={BRIDGE_FP}&pbk={r['public_key']}&sid={r['short_id']}"
                 f"&type=tcp&flow=xtls-rprx-vision#{tag('Каскад')}"]
     cdn = []
     rc = info.get("ru_cdn")
     if rc and rc.get("host"):
-        # российский CDN: packet-up, отправка GET с данными в заголовках (POST там режут)
-        # пакеты до 1500 байт: крупнее не влезают в заголовки и получают 431
-        extra = quote(json.dumps({"uplinkHTTPMethod": "GET", "uplinkDataPlacement": "header",
-                                  "scMaxEachPostBytes": 1500, "scMinPostsIntervalMs": 10},
-                                 separators=(",", ":")), safe="")
-        cdn.append(f"vless://{u}@{rc['host']}:443?encryption=none&security=tls&sni={rc['host']}"
-                   f"&alpn=h2%2Chttp%2F1.1&fp=chrome&type=xhttp&host={rc['host']}"
-                   f"&path={quote(info['xhttp_path'], safe='')}&mode=packet-up&extra={extra}"
-                   f"#{tag('РФ-CDN')}")
+        cdn.append(ru_cdn_link(k, info, tag("РФ-CDN")))
     if info.get("domain") and (cdn_on() or cdn_only):
         # в аварийном режиме (cdn_only) CF-ссылки добавляем даже при выключенном CDN:
         # медленный канал лучше, чем никакого
@@ -259,7 +267,7 @@ def server_links(srv: dict, k: dict, cdn_only: bool = False) -> list[str]:
 
 def cluster_link(cl: dict, k: dict, label: str = "Кластер RU") -> str:
     return (f"vless://{k['uuid']}@{cl['host']}:443?encryption=none&security=reality"
-            f"&sni={cl['sni_tcp']}&fp=chrome&pbk={cl['public_key']}&sid={cl['short_id']}"
+            f"&sni={cl['sni_tcp']}&fp={BRIDGE_FP}&pbk={cl['public_key']}&sid={cl['short_id']}"
             f"&type=tcp&flow=xtls-rprx-vision#{quote(label + ' | ' + k['name'])}")
 
 
@@ -275,11 +283,7 @@ def key_links(k: dict) -> list[str]:
     bridges = [s for s in all_bridges if s["online"]] or all_bridges
     if cl and len(all_bridges) >= 2:
         # кластер: одна ссылка на все мосты (DNS отдаёт адреса всех живых мостов)
-        out = [cluster_link(cl, k)]
-        # запас на случай блокировки домена кластера: та же идентичность, вход по IP
-        ip = json.loads(bridges[0]["info"] or "{}").get("ip")
-        if ip:
-            out.append(cluster_link(cl | {"host": ip}, k, "Кластер RU запас"))
+        out = [cluster_link(cl, k, "Дом")]
     elif bridges:
         out = [l for s in bridges for l in server_links(s, k)]
     else:
@@ -287,10 +291,24 @@ def key_links(k: dict) -> list[str]:
         out = []
         for s in servers:
             out += server_links(s, k)
+    # второй профиль — для мобильной сети, где оператор режет IP мостов: один вход через
+    # российский CDN, мост с CDN приоритетнее (трафик идёт каскадом), иначе выход
+    # Если задан mobile_bridge — это мост в сети, которой доверяет оператор: вход прямо на его IP
+    mob = next((s for s in all_bridges if s["name"] == setting("mobile_bridge", "")), None)
+    if mob and cl:
+        out.append(cluster_link(cl | {"host": json.loads(mob["info"] or "{}")["ip"]}, k, "Мобильный"))
+    else:
+        for s in servers:
+            info = json.loads(s["info"] or "{}")
+            if (info.get("ru_cdn") or {}).get("host") and info.get("xhttp_path"):
+                out.append(ru_cdn_link(k, info, quote(f"Мобильный | {k['name']}")))
+                break
     if setting("emergency", "0") == "1":
         # аварийный канал: CDN-ссылки на выходы. IP серверов за CDN не светятся —
         # единственный путь, если адреса мостов оказались в блоке. Обычно скрыт.
-        out += [l for s in servers if s["role"] == "exit" for l in server_links(s, k, cdn_only=True)]
+        have = {l.split("#")[0] for l in out}  # РФ-CDN уже есть в профиле «Мобильный»
+        out += [l for s in servers if s["role"] == "exit" for l in server_links(s, k, cdn_only=True)
+                if l.split("#")[0] not in have]
     return out
 
 
@@ -760,6 +778,7 @@ def api_overview(u=Depends(tg_user)):
             "keys_online": sum(k["last_active"] > time.time() - 180 for k in keys),
             "traffic_total": sum(k["used_bytes"] for k in keys),
             "cluster": {"host": cl["host"], "addrs": cluster_dns(cl["host"])} if cl else None,
+            "mobile_bridge": setting("mobile_bridge", ""),
             "balancer": balancer_info(),
             "canary": canary_info()}
 
@@ -980,6 +999,8 @@ async def api_settings_edit(body: dict, u=Depends(owner)):
         set_setting("cdn", "1" if body["cdn"] else "0")
     if "emergency" in body:
         set_setting("emergency", "1" if body["emergency"] else "0")
+    if "mobile_bridge" in body:
+        set_setting("mobile_bridge", str(body["mobile_bridge"]))
     if "exit_domains" in body:
         set_setting("exit_domains", json.dumps([str(d) for d in body["exit_domains"]]))
         asyncio.create_task(sync_now())
