@@ -284,7 +284,7 @@ def key_links(k: dict) -> list[str]:
     bridges = [s for s in all_bridges if s["online"]] or all_bridges
     if cl and len(all_bridges) >= 2:
         # кластер: одна ссылка на все мосты (DNS отдаёт адреса всех живых мостов)
-        out = [cluster_link(cl, k, "Дом")]
+        out = [cluster_link(cl, k, "Wi-Fi")]
     elif bridges:
         out = [l for s in bridges for l in server_links(s, k)]
     else:
@@ -294,6 +294,11 @@ def key_links(k: dict) -> list[str]:
             out += server_links(s, k)
     # второй профиль — для мобильной сети, где оператор режет IP мостов: один вход через
     # российский CDN, мост с CDN приоритетнее (трафик идёт каскадом), иначе выход
+    # отдельный мост со своей маскировкой — запасной конфиг для выбранных ключей
+    site_keys = setting("site_bridge_keys", "").split()
+    if "*" in site_keys or k["name"] in site_keys:
+        for s in isolated:
+            out += [l.split("#")[0] + "#" + quote(f"Резерв | {k['name']}") for l in server_links(s, k)]
     # Если задан mobile_bridge — это мост в сети, которой доверяет оператор: вход прямо на его IP
     mob = next((s for s in all_bridges if s["name"] == setting("mobile_bridge", "")), None)
     if mob and cl:
@@ -304,11 +309,6 @@ def key_links(k: dict) -> list[str]:
             if (info.get("ru_cdn") or {}).get("host") and info.get("xhttp_path"):
                 out.append(ru_cdn_link(k, info, quote(f"Мобильный | {k['name']}")))
                 break
-    # отдельный мост со своей маскировкой — запасной конфиг только для выбранных ключей
-    site_keys = setting("site_bridge_keys", "").split()
-    if "*" in site_keys or k["name"] in site_keys:
-        for s in isolated:
-            out += server_links(s, k)
     if setting("emergency", "0") == "1":
         # аварийный канал: CDN-ссылки на выходы. IP серверов за CDN не светятся —
         # единственный путь, если адреса мостов оказались в блоке. Обычно скрыт.
