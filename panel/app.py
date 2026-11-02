@@ -127,16 +127,21 @@ def cluster_enable(host: str) -> dict:
         r = {}
     if not r.get("private_key"):
         kp = subprocess.run(["/usr/local/bin/xray", "x25519"], capture_output=True, text=True)
-        priv = _re.search(r"Private(?:\s+[Kk]ey)?:\s*(\S+)", kp.stdout)
-        pub = _re.search(r"Public(?:\s+[Kk]ey)?:\s*(\S+)", kp.stdout)
-        if not priv or not pub:
+        lines = [l for line in kp.stdout.splitlines() if (l := line.strip())]
+        # формат вывода менялся между версиями: значения — после двоеточия в первых двух строках
+        if len(lines) >= 2 and ":" in lines[0] and ":" in lines[1]:
+            r_priv, r_pub = lines[0].rsplit(":", 1)[-1].strip(), lines[1].rsplit(":", 1)[-1].strip()
+        else:
+            r_priv = r_pub = ""
+        if not r_priv or not r_pub:
             raise HTTPException(500, "Не удалось сгенерировать ключи: " + kp.stdout[:200])
+        r = {"private_key": r_priv, "public_key": r_pub}
         b = q("SELECT info FROM servers WHERE role='bridge' ORDER BY id LIMIT 1")
         sni = "ya.ru"
         if b:
             with contextlib.suppress(Exception):
                 sni = json.loads(b[0]["info"] or "{}")["reality"]["sni_tcp"]
-        r = {"private_key": priv.group(1), "public_key": pub.group(1),
+        r = {"private_key": r_priv, "public_key": r_pub,
              "short_id": secrets.token_hex(8), "sni_tcp": sni}
         set_setting("cluster_reality", json.dumps(r))
     set_setting("cluster_host", host)
