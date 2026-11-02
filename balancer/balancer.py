@@ -10,7 +10,9 @@
 каждого месяца (день начала биллинга VPS).
 
 Запускается по systemd-таймеру на главном сервере. Состояние: /etc/xvpn/balancer.json.
-Настройки: /etc/xvpn/balancer.env (LIMIT_GB, HARD_CAP_GB, PAIR, RESET_DAY).
+Настройки: /etc/xvpn/balancer.env (LIMIT_GB, HARD_CAP_GB, PAIR, RESET_DAY, ROTATE_DAYS).
+ROTATE_DAYS — принудительная смена активных выходов раз в N дней, даже если лимит
+трафика не достигнут: снижает заметность для поведенческого анализа (0 — выкл.).
 """
 import json
 import os
@@ -46,6 +48,7 @@ LIMIT = int(float(conf.get("LIMIT_GB", 200)) * 1024**3)
 HARD_CAP = int(float(conf.get("HARD_CAP_GB", 1800)) * 1024**3)
 PAIR = int(conf.get("PAIR", 2))
 RESET_DAY = int(conf.get("RESET_DAY", 1))
+ROTATE_DAYS = int(conf.get("ROTATE_DAYS", 0))
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 API = f"http://127.0.0.1:8080/{PANEL_PATH}/api"
@@ -110,6 +113,7 @@ def main():
         net[sid] = now  # при перезагрузке сервера счётчик обнуляется — дельту не считаем
 
     working = [s for s in pool if s.get("cascade")]
+    since = state.setdefault("since", {})  # sid -> ts включения в каскад
     changed = False
 
     def set_cascade(s, val):
@@ -118,7 +122,15 @@ def main():
         if not DRY_RUN:
             api("PATCH", f"/servers/{s['id']}", {"cascade": val})
         s["cascade"] = val
+        sid = str(s["id"])
+        if val:
+            since[sid] = int(time.time())
+        else:
+            since.pop(sid, None)
         changed = True
+
+    for s in working:  # подстраховка для старых состояний без since
+        since.setdefault(str(s["id"]), int(time.time()))
 
     # страховка: жёсткий лимит — выключить, пока есть чем заменить
     for s in list(working):
@@ -135,6 +147,18 @@ def main():
             set_cascade(s, 0)
             working.remove(s)
             notify(f"🔄 Балансировщик: {s['name']} отдал {gb(served[sid])} — уходит на отдых.")
+
+    # ротация по времени: размывает привычную картину «одни и те же IP месяцами»
+    if ROTATE_DAYS > 0:
+        for s in list(working):
+            sid = str(s["id"])
+            age_days = (int(time.time()) - since.get(sid, int(time.time()))) / 86400
+            if age_days >= ROTATE_DAYS and len(working) > 1 and \
+                    any(served.get(str(r["id"]), 0) < LIMIT
+                        for r in pool if not r.get("cascade")):
+                set_cascade(s, 0)
+                working.remove(s)
+                notify(f"🕐 Балансировщик: {s['name']} работал {int(age_days)} дн. — плановая смена выхода.")
 
     # добираем рабочую пару из самых отдохнувших
     resting = [s for s in pool if not s.get("cascade") and served.get(str(s["id"]), 0) < LIMIT]
