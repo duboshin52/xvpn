@@ -4,6 +4,7 @@
 Telegram-бот (если задан BOT_TOKEN) и мини-апп (если ещё и DOMAIN)."""
 import asyncio
 import base64
+import concurrent.futures
 import contextlib
 import hashlib
 import hmac
@@ -11,6 +12,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import sqlite3
 import ssl
 import threading
@@ -628,10 +630,22 @@ def api_overview(u=Depends(tg_user)):
                         "last_seen": s["last_seen"], "status": st,
                         "info": json.loads(s["info"] or "null")})
     states = [key_state(k) for k in keys]
+    cl = cluster_conf()
     return {"servers": servers, "cdn": cdn_on(), "keys_total": len(keys), "keys_active": states.count("active"),
             "keys_online": sum(k["last_active"] > time.time() - 180 for k in keys),
             "traffic_total": sum(k["used_bytes"] for k in keys),
+            "cluster": {"host": cl["host"], "addrs": cluster_dns(cl["host"])} if cl else None,
             "balancer": balancer_info()}
+
+
+def cluster_dns(host: str) -> list[str]:
+    """Актуальные A-записи домена кластера (точки входа)."""
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            infos = ex.submit(socket.getaddrinfo, host, 443, socket.AF_INET).result(timeout=3)
+        return sorted({i[4][0] for i in infos})
+    except Exception:
+        return []
 
 
 def balancer_info():
