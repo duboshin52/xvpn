@@ -204,7 +204,7 @@ def create_key(name: str, days: float, gb: float, by: int) -> dict:
     return q("SELECT * FROM keys WHERE id=?", (kid,), one=True)
 
 
-def server_links(srv: dict, k: dict) -> list[str]:
+def server_links(srv: dict, k: dict, cdn_only: bool = False) -> list[str]:
     info = json.loads(srv["info"] or "{}")
     if not info:
         return []
@@ -233,6 +233,8 @@ def server_links(srv: dict, k: dict) -> list[str]:
                # packet-up: каждый кусок — отдельный запрос; через Cloudflare работает и без gRPC
                # (в stream-up Cloudflare без gRPC буферизует отправку — «нет обратного трафика»)
                f"&path={quote(info['xhttp_path'], safe='')}&mode=packet-up#{tag('XHTTP-CDN')}"]
+    if cdn_only:
+        return cdn
     return cdn + [
         f"vless://{u}@{h}:443?encryption=none&security=reality&sni={r['sni_tcp']}"
         f"&fp=chrome&pbk={r['public_key']}&sid={r['short_id']}&type=tcp&flow=xtls-rprx-vision"
@@ -258,13 +260,18 @@ def key_links(k: dict) -> list[str]:
     bridges = [s for s in servers if s["role"] == "bridge"]
     if cl and len(bridges) >= 2:
         # кластер: одна ссылка на все мосты (DNS отдаёт адреса всех живых мостов)
-        return [cluster_link(cl, k)]
-    if bridges:
-        return [l for s in bridges for l in server_links(s, k)]
-    # мостов нет — прямые ссылки на выходы
-    out = []
-    for s in servers:
-        out += server_links(s, k)
+        out = [cluster_link(cl, k)]
+    elif bridges:
+        out = [l for s in bridges for l in server_links(s, k)]
+    else:
+        # мостов нет — прямые ссылки на выходы
+        out = []
+        for s in servers:
+            out += server_links(s, k)
+    if setting("emergency", "0") == "1":
+        # аварийный канал: CDN-ссылки на выходы. IP серверов за CDN не светятся —
+        # единственный путь, если адреса мостов оказались в блоке. Обычно скрыт.
+        out += [l for s in servers if s["role"] == "exit" for l in server_links(s, k, cdn_only=True)]
     return out
 
 
@@ -886,13 +893,16 @@ async def api_server_restart(sid: int, u=Depends(tg_user)):
 @app.get(P + "/api/settings")
 def api_settings(u=Depends(tg_user)):
     c = cluster_conf()
-    return {"cdn": cdn_on(), "cluster": bool(c), "cluster_host": c["host"] if c else ""}
+    return {"cdn": cdn_on(), "cluster": bool(c), "cluster_host": c["host"] if c else "",
+            "emergency": setting("emergency", "0") == "1"}
 
 
 @app.patch(P + "/api/settings")
 async def api_settings_edit(body: dict, u=Depends(owner)):
     if "cdn" in body:
         set_setting("cdn", "1" if body["cdn"] else "0")
+    if "emergency" in body:
+        set_setting("emergency", "1" if body["emergency"] else "0")
     if "cluster" in body:
         if body["cluster"]:
             host = str(body.get("cluster_host") or setting("cluster_host", ""))
@@ -901,7 +911,8 @@ async def api_settings_edit(body: dict, u=Depends(owner)):
             set_setting("cluster", "0")
         await sync_now()  # мосты принимают общие ключи или возвращают свои
     c = cluster_conf()
-    return {"cdn": cdn_on(), "cluster": bool(c), "cluster_host": c["host"] if c else ""}
+    return {"cdn": cdn_on(), "cluster": bool(c), "cluster_host": c["host"] if c else "",
+            "emergency": setting("emergency", "0") == "1"}
 
 
 @app.post(P + "/api/sync")

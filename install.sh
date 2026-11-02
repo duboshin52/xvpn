@@ -570,13 +570,16 @@ server {
     location $XHTTP_PATH/ {
         client_max_body_size 0;
         client_body_timeout 1h;
-        grpc_pass unix:/dev/shm/xvpn-xhttp.sock;
-        grpc_buffer_size 16k;
-        grpc_socket_keepalive on;
-        grpc_read_timeout 1h;
-        grpc_send_timeout 1h;
-        grpc_set_header Connection "";
-        grpc_set_header X-Real-IP \$remote_addr;
+        # packet-up: обычные HTTP-запросы через Cloudflare (gRPC там без отдельной
+        # настройки буферизуется). grpc_pass их не принимает — только proxy_pass.
+        proxy_pass http://unix:/dev/shm/xvpn-xhttp.sock;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_set_header Host \$host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
     }$agent_loc$panel_locs
     location / { try_files \$uri /index.html; }
 }

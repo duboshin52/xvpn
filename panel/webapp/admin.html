@@ -467,7 +467,7 @@ async function kDel(id){if(await ask('Удалить ключ насовсем?'
 
 /* ---------- серверы ---------- */
 async function rServers(){
-  const o=await api('/overview');
+  const o=await api('/overview'), st=await api('/settings');
   const bal=o.balancer;
   let h = o.servers.map(s=>{
     const i=s.info||{}, r=i.reality||{}, bridge=s.role==='bridge';
@@ -485,6 +485,8 @@ async function rServers(){
   if(!o.servers.length) h = `<div class="card empty">${cat('sleepy','#D9D3E6',72)}<p>Серверов пока нет.</p></div>`;
   if(ME.is_owner&&o.servers.some(s=>s.info&&s.info.domain)) h = `<div class="card"><label class="switch" style="margin-top:0"><input type="checkbox" ${o.cdn?'checked':''} onchange="setCdn(this.checked)"><s></s>CDN-ссылки в подписках</label>
    <div class="mute small" style="margin-top:6px">XHTTP через Cloudflare. В России Cloudflare часто замедляют, и такие ссылки не работают — тогда выключите.</div></div>` + h;
+  if(ME.is_owner) h = `<div class="card"><label class="switch" style="margin-top:0"><input type="checkbox" ${st.emergency?'checked':''} onchange="setEmergency(this.checked)"><s></s>Аварийный CDN-канал</label>
+   <div class="mute small" style="margin-top:6px">Если IP мостов окажутся в блоке — включите: в подписках появятся ссылки через CDN, IP серверов при этом не видны. Клиентам — обновить подписку. После восстановления кластера выключите.</div></div>` + h;
   if(ME.is_owner) h += `<h2>Добавить сервер</h2><div class="card">
    <div class="mute small">Обычная нода: <code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) node</code>
    Мост на российском VPS: <code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/duboshin52/xvpn/main/install.sh) bridge</code>
@@ -496,6 +498,7 @@ async function rServers(){
   $('#v').innerHTML=h;
 }
 async function setCdn(v){try{await api('/settings','PATCH',{cdn:v});haptic('success')}catch(e){toast(e.message)}rServers()}
+async function setEmergency(v){try{await api('/settings','PATCH',{emergency:v});haptic('success');toast(v?'Аварийный канал включён. Клиентам — обновить подписку':'Аварийный канал скрыт')}catch(e){toast(e.message)}rServers()}
 async function sAdd(b){b.disabled=true;try{await api('/servers','POST',{name:$('#sn').value,url:$('#su').value,secret:$('#ss').value});haptic('success');rServers()}catch(e){toast(e.message);b.disabled=false}}
 async function sEdit(id,b){try{await api(`/servers/${id}`,'PATCH',b);haptic('success');rServers()}catch(e){toast(e.message);rServers()}}
 function sRen(id){inputS('Новое имя сервера','','text',v=>{closeS();v&&sEdit(id,{name:v})})}
