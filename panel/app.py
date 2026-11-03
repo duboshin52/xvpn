@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS keys(id INTEGER PRIMARY KEY, name TEXT, uuid TEXT, su
   limit_bytes INTEGER DEFAULT 0, used_bytes INTEGER DEFAULT 0, expire_at INTEGER DEFAULT 0,
   enabled INTEGER DEFAULT 1, created_at INTEGER, created_by INTEGER, last_active INTEGER DEFAULT 0,
   notified INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS entry_traffic(day TEXT, sid INTEGER, inbound TEXT, up INTEGER DEFAULT 0,
+  down INTEGER DEFAULT 0, PRIMARY KEY(day, sid, inbound));
 """)
 # миграции: каскад (role = exit|bridge, cert — закреплённый сертификат агента моста,
 # bridge_uuid — служебный пользователь моста на выходах, cascade — нода работает выходом для мостов)
@@ -203,7 +205,8 @@ def key_out(k: dict) -> dict:
     k = dict(k)
     k["state"] = key_state(k)
     k["sub_url"] = f"https://{DOMAIN}{SUB_PATH}/{k['sub_token']}" if DOMAIN else None
-    rc = main_ru_cdn()
+    # sub_host — публичный адрес подписки, по которому главный сервер не виден
+    rc = setting("sub_host", "") or main_ru_cdn()
     k["sub_url_ru"] = f"https://{rc}{SUB_PATH}/{k['sub_token']}" if rc else None
     k["online"] = k["last_active"] > time.time() - 180
     return k
@@ -490,6 +493,11 @@ async def sync_server(srv: dict, users: list[dict]):
         if total and email.startswith("k") and email[1:].isdigit():
             qx("UPDATE keys SET used_bytes=used_bytes+?, load_bytes=load_bytes+?, last_active=? WHERE id=?",
                (total, total, now, int(email[1:])))
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    for tag, t in (st.get("inbounds") or {}).items():
+        if t["up"] or t["down"]:
+            qx("INSERT INTO entry_traffic(day,sid,inbound,up,down) VALUES(?,?,?,?,?) ON CONFLICT(day,sid,inbound) "
+               "DO UPDATE SET up=up+excluded.up, down=down+excluded.down", (day, srv["id"], tag, t["up"], t["down"]))
     await agent(srv, "POST", "/sync", sync_body(srv, users), timeout=40)
     status = await agent(srv, "GET", "/status")
     with contextlib.suppress(Exception):
@@ -785,8 +793,38 @@ def api_overview(u=Depends(tg_user)):
             "traffic_total": sum(k["used_bytes"] for k in keys),
             "cluster": {"host": cl["host"], "addrs": cluster_dns(cl["host"])} if cl else None,
             "mobile_bridge": setting("mobile_bridge", ""),
+            "entries": entry_stats(),
             "balancer": balancer_info(),
             "canary": canary_info()}
+
+
+def entry_stats() -> list[dict]:
+    """Трафик по точкам входа клиентов: сегодня, за месяц (UTC) и всего.
+
+    Reality на выходах не считаем: это трафик мостов, он уже учтён на входе."""
+    servers = {s["id"]: s for s in q("SELECT id, name, info FROM servers")}
+    mobile = setting("mobile_bridge", "")
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    entries = {n: {"name": n, "today": 0, "month": 0, "total": 0, "servers": {}}
+               for n in ("Wi-Fi", "Резерв", "Мобильный", "CDN")}
+    for r in q("SELECT day, sid, inbound, up + down AS bytes FROM entry_traffic"):
+        s = servers.get(r["sid"])
+        if not s:
+            continue
+        if r["inbound"] in ("xhttp-cdn", "bridge-cdn"):
+            e = entries["CDN"]
+        elif r["inbound"] == "bridge-in":
+            standalone = json.loads(s["info"] or "{}").get("standalone")
+            e = entries["Резерв" if standalone else "Мобильный" if s["name"] == mobile else "Wi-Fi"]
+        else:
+            continue
+        e["total"] += r["bytes"]
+        if r["day"][:7] == today[:7]:
+            e["month"] += r["bytes"]
+            e["servers"][s["name"]] = e["servers"].get(s["name"], 0) + r["bytes"]
+        if r["day"] == today:
+            e["today"] += r["bytes"]
+    return list(entries.values())
 
 
 def cluster_dns(host: str) -> list[str]:
@@ -1005,6 +1043,8 @@ async def api_settings_edit(body: dict, u=Depends(owner)):
         set_setting("cdn", "1" if body["cdn"] else "0")
     if "emergency" in body:
         set_setting("emergency", "1" if body["emergency"] else "0")
+    if "sub_host" in body:
+        set_setting("sub_host", str(body["sub_host"]).strip().lower())
     if "mobile_bridge" in body:
         set_setting("mobile_bridge", str(body["mobile_bridge"]))
     if "site_bridge_keys" in body:

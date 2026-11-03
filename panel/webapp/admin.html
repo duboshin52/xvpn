@@ -293,7 +293,7 @@ function yarnCard(b, servers){
 }
 
 function clusterCard(o){
-  const cl=o.cluster, bridges=o.servers.filter(s=>s.role==='bridge');
+  const cl=o.cluster, bridges=o.servers.filter(s=>s.role==='bridge'&&!s.info?.standalone&&s.name!==o.mobile_bridge);
   const b0=bridges.find(b=>b.online&&b.status)||bridges[0]||{status:null};
   const exits=groupExits(b0,o.servers);
   const upIps=new Set(bridges.filter(b=>b.online&&b.status?.xray?.active).map(b=>b.info?.ip));
@@ -302,7 +302,6 @@ function clusterCard(o){
   const ips=cl.addrs||[];
   const upCnt=ips.length?ips.filter(onOf).length:upIps.size;
   const total=ips.length||bridges.length;
-  const bt=bridges.reduce((a,b)=>a+(b.status?.net?(+b.status.net.sent+(+b.status.net.recv)):0),0);
   const alive=exits.filter(e=>e.alive);
   const resting=o.servers.filter(s=>s.role==='exit'&&s.enabled&&!s.cascade);
   const bal=o.balancer;
@@ -347,9 +346,20 @@ function clusterCard(o){
   if(!bridges.length) note=`<span class="tag bad"><i></i>мосты не добавлены</span>`;
   else if(!clUp) note=`<span class="tag bad"><i></i>все точки входа спят</span>`;
   else if(!alive.length) note=`<span class="tag bad"><i></i>все выходы спят — трафик за рубеж не идёт</span>`;
-  else note=`<span class="tag ok"><i></i>живых выходов: ${alive.length} из ${exits.length}</span><span class="tag pink"><i></i>трафик через мосты: ${fb(bt)}</span>`;
+  else note=`<span class="tag ok"><i></i>живых выходов: ${alive.length} из ${exits.length}</span>`;
   return `<section class="yarn"><h3>Кластер</h3>${s}
     <div class="legend">${note}<span class="tag"><i></i>российские сайты — напрямую</span>${resting.length?`<span class="tag">💤 отдыхают: ${resting.map(s=>esc(s.name)).join(', ')}</span>`:''}</div></section>`;
+}
+
+/* ---------- трафик по входам ---------- */
+function entriesCard(o){
+  const list=o.entries||[], month=list.reduce((a,e)=>a+e.month,0);
+  const info={'Wi-Fi':'кластер','Резерв':'мост на сервере сайта','Мобильный':'мост в Yandex Cloud','CDN':'через российский CDN'};
+  const rows=list.map(e=>{
+    const by=Object.entries(e.servers).sort((a,b)=>b[1]-a[1]).map(([n,v])=>`${esc(n)} ${fb(v)}`).join(' · ');
+    return `${meter(`<b>${esc(e.name)}</b> <span class="mute">${info[e.name]||''}</span>`,`${fb(e.month)} за месяц`,pct(e.month,month||1))}
+      <div class="mute small" style="margin:-4px 0 8px">сегодня ${fb(e.today)}${by?' · '+by:''}</div>`}).join('');
+  return `<h2>Входы</h2><article class="card">${rows}<div class="mute small">Учёт с момента обновления панели, трафик в обе стороны.</div></article>`;
 }
 
 /* ---------- вкладка «Котики» ---------- */
@@ -366,6 +376,7 @@ async function rStatus(){
     <div class="stat"><b>${o.keys_online}</b><span>онлайн сейчас</span></div>
     <div class="stat"><b>${fb(o.traffic_total).replace(' ','&nbsp;')}</b><span>трафик всего</span></div></div>`;
   h += o.cluster ? clusterCard(o) : bridges.map(b=>yarnCard(b,o.servers)).join('');
+  h += entriesCard(o);
   if(!bridges.length && o.servers.length && ME.is_owner) h += `<div class="card row">${cat('awake','#FFB36B',44)}<div class="grow small"><b>Каскада нет.</b> Поставьте мост на российский VPS — он работает даже при белых списках. Команда во вкладке «Серверы».</div></div>`;
   if(o.servers.length) h += `<h2>Серверы</h2><div class="grid2">`;
   for(const s of o.servers){

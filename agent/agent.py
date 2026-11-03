@@ -21,6 +21,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 
 import psutil
@@ -42,6 +43,10 @@ RU_DOMAINS = [r"regexp:\.ru$", r"regexp:\.su$", r"regexp:\.xn--p1ai$",
               "domain:vk.com", "domain:vk.me", "domain:userapi.com", "domain:vkuser.net",
               "domain:mycdn.me", "domain:okcdn.ru", "domain:max.ru"]
 XHTTP_SOCK = "/dev/shm/xvpn-xhttp.sock"
+WATCHDOG_FILE = os.path.join(BASE, "watchdog.json")
+WATCH_EVERY = int(os.environ.get("XVPN_WATCH_EVERY", 20))  # проверка входа моста, секунд
+WATCH_LIMIT = int(os.environ.get("XVPN_WATCH_LIMIT", 3))   # висящих рукопожатий — перезапуск Xray
+WATCH_GAP = int(os.environ.get("XVPN_WATCH_GAP", 900))     # перезапуск не чаще, секунд
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -359,6 +364,20 @@ def sync(body: dict):
     return {"ok": True, "changed": changed or keys_changed}
 
 
+def inbound_stats() -> dict[str, dict]:
+    """Трафик по входам Xray с прошлого запроса (со сбросом): так видно долю CDN и каждого входа."""
+    p = run([XRAY_BIN, "api", "statsquery", f"--server={API_ADDR}", "-pattern", "inbound>>>", "-reset"])
+    out: dict[str, dict] = {}
+    if p.returncode != 0:
+        return out
+    for s in (json.loads(p.stdout or "{}").get("stat") or []):
+        parts = s["name"].split(">>>")  # inbound>>>tag>>>traffic>>>uplink
+        if len(parts) == 4 and parts[1] != "api":
+            d = out.setdefault(parts[1], {"up": 0, "down": 0})
+            d["up" if parts[3] == "uplink" else "down"] += int(s.get("value", 0))
+    return out
+
+
 @app.get("/stats", dependencies=[Depends(auth)])
 def stats():
     p = run([XRAY_BIN, "api", "statsquery", f"--server={API_ADDR}", "-pattern", "user>>>", "-reset"])
@@ -371,7 +390,7 @@ def stats():
             continue
         d = out.setdefault(parts[1], {"up": 0, "down": 0})
         d["up" if parts[3] == "uplink" else "down"] += int(s.get("value", 0))
-    return {"users": out}
+    return {"users": out, "inbounds": inbound_stats()}
 
 
 def exits_health() -> list[dict]:
@@ -393,20 +412,60 @@ def exits_health() -> list[dict]:
     return out
 
 
-def stalled_handshakes(port: int) -> int:
+def stalled_handshakes(port: int, newest: int = 300) -> int:
     """Клиенты на входе, которые прислали рукопожатие и не получили ни байта.
 
     Reality ждёт ответ маскировочного сайта: если тот молчит, клиент висит
-    «подключённым» без интернета. Берём только свежие (10 с — 5 мин): старые
+    «подключённым» без интернета. Берём только свежие (10 с — newest с): старые
     зависшие соединения держатся часами и о текущем сбое не говорят."""
     out = run(["ss", "-tinH", "state", "established", f"( sport = :{port} )"]).stdout
     n = 0
     for line in out.splitlines():
         if "bytes_received:" in line and "bytes_sent:" not in line:
             m = re.search(r"lastrcv:(\d+)", line)
-            if m and 10000 <= int(m.group(1)) <= 300000:
+            if m and 10000 <= int(m.group(1)) <= newest * 1000:
                 n += 1
     return n
+
+
+def load_watchdog() -> dict:
+    try:
+        with open(WATCHDOG_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def watchdog() -> None:
+    """Сторож моста: Xray иногда перестаёт отвечать на рукопожатия части клиентов.
+
+    Канарейке с её адресов это не видно, а у клиента «подключено» без интернета;
+    перезапуск снимает. Здоровый Reality отвечает за миллисекунды, поэтому
+    WATCH_LIMIT висящих рукопожатий две проверки подряд — повод перезапустить."""
+    strikes = 0
+    while True:
+        time.sleep(WATCH_EVERY)
+        try:
+            node = load_node()
+            if role(node) != "bridge":
+                return
+            n = stalled_handshakes(int(node.get("port", 443)), newest=600)
+            strikes = strikes + 1 if n >= WATCH_LIMIT else 0
+            last = load_watchdog()
+            if strikes < 2 or time.time() - last.get("t", 0) < WATCH_GAP:
+                continue
+            ok = run(["systemctl", "restart", XRAY_SERVICE]).returncode == 0
+            rec = {"t": int(time.time()), "stalled": n, "ok": ok, "count": last.get("count", 0) + 1}
+            with open(WATCHDOG_FILE + ".tmp", "w") as f:
+                json.dump(rec, f)
+            os.replace(WATCHDOG_FILE + ".tmp", WATCHDOG_FILE)
+            print(f"watchdog: {n} рукопожатий без ответа, перезапуск Xray: {ok}", flush=True)
+            strikes = 0
+        except Exception as e:
+            print(f"watchdog: {e}", flush=True)
+
+
+threading.Thread(target=watchdog, daemon=True).start()
 
 
 @app.get("/status", dependencies=[Depends(auth)])
@@ -426,6 +485,7 @@ def status():
     if role(node) == "bridge":
         extra["exits"] = exits_health()
         extra["stalled"] = stalled_handshakes(int(node.get("port", 443)))
+        extra["watchdog"] = load_watchdog()
     return extra | {
         "cpu": psutil.cpu_percent(interval=0.3), "cores": psutil.cpu_count(),
         "load": os.getloadavg(),

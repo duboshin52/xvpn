@@ -41,6 +41,7 @@ ${B}Серверы${N} (на главном сервере)
   xvpn rucdn [off]                вход через российский CDN (Yandex Cloud CDN и др.) на этом сервере
   xvpn sync                       синхронизировать сейчас
   xvpn mobile ИМЯ_МОСТА           мост для профиля «Мобильный» в подписке
+  xvpn subhost ДОМЕН              публичный адрес подписки
   xvpn sitekeys [КЛЮЧ…|'*']       ключи, которым виден отдельный мост со своей маскировкой (* — всем)
   xvpn exitdomains ДОМЕН…         заменить список заблокированных .ru-сайтов, идущих через выход
 
@@ -237,6 +238,10 @@ case "$cmd" in
       *) die "xvpn server add|del|rename|cascade|hide|show" ;;
     esac ;;
   sync) need_main; api POST /sync >/dev/null; ok "Синхронизировано" ;;
+  subhost)
+    need_main; [[ $# -gt 0 ]] || die "xvpn subhost ДОМЕН (пустая строка — адрес по умолчанию)"
+    api PATCH /settings "$(jq -nc --arg h "$1" '{sub_host:$h}')" >/dev/null
+    ok "Адрес подписки: ${1:-по умолчанию}" ;;
   sitekeys)
     need_main
     api PATCH /settings "$(jq -nc --arg k "$*" '{site_bridge_keys:$k}')" >/dev/null

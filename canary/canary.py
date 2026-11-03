@@ -55,6 +55,7 @@ DEAD_AFTER = int(conf.get("DEAD_AFTER", 3))    # столько прогонов
 MIN_DNS = int(conf.get("MIN_DNS", 2))          # меньше стольких A-записей автоматика не оставит
 PATH_AFTER = int(conf.get("PATH_AFTER", 3))    # столько прогонов подряд путь мёртв — алерт
 STALLED_LIMIT = int(conf.get("STALLED_LIMIT", 10))  # свежих рукопожатий без ответа на мосту — алерт
+RESTART_GAP = int(conf.get("RESTART_GAP", 1800))    # автоперезапуск Xray на мосту не чаще, секунд
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 
@@ -189,6 +190,21 @@ def main():
     mask = state.setdefault("mask", {})  # ip -> {"ok": bool, "ts": ts} — маскировка по TLS
     paths = state.setdefault("paths", {})  # мост:путь -> сколько прогонов подряд мёртв
     stalls = state.setdefault("stalls", {})  # id моста -> сколько прогонов подряд выше порога
+    mask_fails = state.setdefault("mask_fails", {})  # id моста -> сколько прогонов подряд TLS не прошёл
+    restarts = state.setdefault("restarts", {})  # id моста -> когда перезапускали Xray
+    watched = state.setdefault("watchdog", {})  # id моста -> последний перезапуск сторожем, о котором сообщили
+
+    def heal(s, why):
+        """Xray со временем зависает на рукопожатиях с отдельных адресов, перезапуск это снимает."""
+        sid = str(s["id"])
+        if DRY_RUN or now - restarts.get(sid, 0) < RESTART_GAP:
+            return
+        restarts[sid] = now
+        try:
+            api("POST", f"/servers/{s['id']}/restart")
+            notify(f"🔁 Канарейка: перезапустила Xray на мосту «{s['name']}»: {why}")
+        except Exception as e:
+            notify(f"🔴 Канарейка: не смогла перезапустить Xray на мосту «{s['name']}»: {e}")
 
     # 1. живость нод
     for s in servers:
@@ -205,6 +221,14 @@ def main():
             report(f"stall:{sid}", f"на мосту «{s['name']}» {stalled} рукопожатий без ответа: "
                                    f"клиенты подключены, но интернета нет. Похоже, молчит сайт маскировки"
                    if stalls[sid] >= 2 else None)
+            if stalls[sid] >= 2:
+                heal(s, f"{stalled} рукопожатий без ответа")
+        # сторож на самом мосту перезапускает Xray сам — сообщаем о каждом новом перезапуске
+        wd = (s.get("status") or {}).get("watchdog") or {}
+        if wd.get("t") and wd["t"] != watched.get(str(s["id"])):
+            watched[str(s["id"])] = wd["t"]
+            notify(f"🔁 Сторож моста «{s['name']}» перезапустил Xray: {wd.get('stalled')} рукопожатий "
+                   "без ответа" + ("" if wd.get("ok") else ", но перезапуск НЕ удался"))
         # путь мост → выход: сервер может быть жив, а маршрут из РФ к нему закрыт.
         # Единичные сбои одного из двух путей обычны: алерт — если путь мёртв PATH_AFTER
         # прогонов подряд или мертвы оба пути к выходу два прогона (после рестарта замеров нет)
@@ -236,6 +260,10 @@ def main():
         report(f"mask:{ip}", None if ok else
                f"маскировка моста «{s['name']}» ({ip}) сломана: {det}. "
                f"Проверь, что {sni} отвечает по TLS, или смени SNI")
+        sid = str(s["id"])
+        mask_fails[sid] = 0 if ok else mask_fails.get(sid, 0) + 1
+        if mask_fails[sid] >= 2:
+            heal(s, f"TLS не отвечает два прогона: {det}"[:120])
 
     # 3. DNS кластера против живых мостов
     if cl:
