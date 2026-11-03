@@ -14,6 +14,8 @@
            остальное через выходы (несколько — пользователи закреплены за выходами панелью
            по нагрузке, внутри выхода leastPing, при падении — перекрёстный резерв; проверка каждые 30 с)
 """
+import concurrent.futures
+import contextlib
 import urllib.request
 import hashlib
 import hmac
@@ -23,6 +25,7 @@ import re
 import subprocess
 import threading
 import time
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import psutil
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -514,3 +517,70 @@ def status():
 def restart():
     p = run(["systemctl", "restart", XRAY_SERVICE])
     return {"ok": p.returncode == 0}
+
+
+# ---------------------------------------------------------------- проба входов из этой сети
+PROBE_SMALL = "https://www.gstatic.com/generate_204"
+PROBE_BIG = "https://speed.cloudflare.com/__down?bytes=300000"  # больше ~20 КБ: ловит «замерзание» TLS
+
+
+def probe_outbound(link: str) -> dict | None:
+    """vless://…?security=reality&type=tcp → outbound Xray; другие виды ссылок не проверяем."""
+    u = urlsplit(link)
+    p = dict(parse_qsl(u.query))
+    if u.scheme != "vless" or p.get("security") != "reality" or p.get("type", "tcp") != "tcp":
+        return None
+    user = {"id": unquote(u.username or ""), "encryption": "none"}
+    if p.get("flow"):
+        user["flow"] = p["flow"]
+    return {"protocol": "vless",
+            "settings": {"vnext": [{"address": u.hostname, "port": u.port or 443, "users": [user]}]},
+            "streamSettings": {"network": "tcp", "security": "reality",
+                               "realitySettings": {"serverName": p.get("sni", ""), "publicKey": p.get("pbk", ""),
+                                                   "shortId": p.get("sid", ""),
+                                                   "fingerprint": p.get("fp", "chrome")}}}
+
+
+def probe_one(link: str, port: int) -> dict:
+    name = link.split("#", 1)[1] if "#" in link else ""
+    name = unquote(name).split(" | ")[0]
+    ob = probe_outbound(link)
+    if not ob:
+        return {"name": name, "ok": None, "err": "вид ссылки не проверяется"}
+    cfg = {"log": {"loglevel": "none"},
+           "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "socks", "settings": {"udp": False}}],
+           "outbounds": [ob]}
+    path = f"/dev/shm/xvpn-probe-{port}.json"
+    with open(path, "w") as f:
+        json.dump(cfg, f)
+    proc = subprocess.Popen([XRAY_BIN, "run", "-c", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(1)
+        out = {"name": name, "host": urlsplit(link).hostname}
+        px = f"socks5h://127.0.0.1:{port}"
+        r = run(["curl", "-s", "-o", "/dev/null", "-x", px, "--max-time", "10",
+                 "-w", "%{http_code} %{time_total}", PROBE_SMALL], timeout=15).stdout.split()
+        if not r or r[0] != "204":
+            return out | {"ok": False, "err": f"нет связи (код {r[0] if r else '—'})"}
+        out["ms"] = int(float(r[1]) * 1000)
+        r = run(["curl", "-s", "-o", "/dev/null", "-x", px, "--max-time", "20",
+                 "-w", "%{size_download} %{time_total}", PROBE_BIG], timeout=25).stdout.split()
+        got = int(r[0]) if r else 0
+        if got < 300000:
+            return out | {"ok": False, "err": f"скачалось {got // 1024} КБ из 293"}
+        return out | {"ok": True, "kbps": int(got / 1024 / max(float(r[1]), 0.001))}
+    except Exception as e:
+        return {"name": name, "ok": False, "err": f"{type(e).__name__} {e}"}
+    finally:
+        proc.kill()
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
+@app.post("/probe", dependencies=[Depends(auth)])
+def probe(body: dict):
+    """Проверить ссылки подписки из сети этого сервера: связь и скачивание 300 КБ через каждую."""
+    links = [str(l) for l in body.get("links", [])][:12]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        res = list(ex.map(lambda a: probe_one(a[1], 20800 + a[0]), enumerate(links)))
+    return {"results": res}

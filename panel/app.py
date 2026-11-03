@@ -19,7 +19,7 @@ import ssl
 import threading
 import time
 import uuid as uuidlib
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 import httpx
 from aiogram import Bot, Dispatcher, F
@@ -1052,6 +1052,32 @@ async def api_server_restart(sid: int, u=Depends(tg_user)):
     if not s:
         raise HTTPException(404)
     return await agent(s, "POST", "/restart")
+
+
+@app.post(P + "/api/servers/{sid}/probe")
+async def api_server_probe(sid: int, body: dict, u=Depends(tg_user)):
+    """Проверка входов глазами клиента: агент сервера sid (в российской сети) подключается
+    по ссылкам подписки ключа и качает через них. Вход кластера — по каждому адресу из DNS."""
+    s = q("SELECT * FROM servers WHERE id=?", (sid,), one=True)
+    k = q("SELECT * FROM keys WHERE name=?", (str(body.get("key", "")),), one=True)
+    if not s or not k:
+        raise HTTPException(404, "нет такого сервера или ключа")
+    own = json.loads(s["info"] or "{}").get("ip")
+    links = []
+    for l in key_links(k):
+        host = urlsplit(l).hostname or ""
+        if host == own:
+            continue  # к себе по внешнему адресу из облака часто не пускают — это не про клиентов
+        try:
+            ips = sorted({a[4][0] for a in await asyncio.to_thread(socket.getaddrinfo, host, 443,
+                                                                    socket.AF_INET, socket.SOCK_STREAM)})
+        except OSError:
+            ips = [host]
+        name, _, label = l.partition("#")
+        for ip in ips:
+            tag = quote(f"{unquote(label).split(' | ')[0]} {ip}") if ip != host else label
+            links.append(name.replace(f"@{host}:", f"@{ip}:", 1) + "#" + tag)
+    return await agent(s, "POST", "/probe", {"links": links}, timeout=90)
 
 
 @app.get(P + "/api/settings")

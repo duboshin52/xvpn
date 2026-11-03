@@ -195,6 +195,7 @@ install_xray() {
 }
 
 # geoip.dat устаревает, а правило «РФ напрямую» на нём держится: раз в неделю свежая база
+# из того же источника, что при установке (установщик XTLS). $$ — systemd иначе подставит переменную
 install_geodata_timer() {
   cat >/etc/systemd/system/xvpn-geodata.service <<'EOF'
 [Unit]
@@ -202,7 +203,7 @@ Description=xvpn geodata update
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'cd /usr/local/share/xray && for f in geoip geosite; do curl -fsSL -o $f.new https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f.dat && [ -s $f.new ] && mv $f.new $f.dat; done; rm -f *.new; /usr/local/bin/xray run -test -c /usr/local/etc/xray/config.json >/dev/null && systemctl restart xray'
+ExecStart=/bin/bash -c 'i=$$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) && bash -c "$$i" @ install-geodata >/dev/null && /usr/local/bin/xray run -test -c /usr/local/etc/xray/config.json >/dev/null && systemctl restart xray'
 EOF
   cat >/etc/systemd/system/xvpn-geodata.timer <<'EOF'
 [Unit]
@@ -604,6 +605,7 @@ server {
     ssl_session_cache shared:xvpn:10m;
     root /var/www/xvpn;
     server_tokens off;
+    access_log off;  # пути подписок и панели — секреты, а XHTTP пишет сотни МБ в день
 
     location $XHTTP_PATH/ {
         client_max_body_size 0;
@@ -636,6 +638,7 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     root /var/www/xvpn;
     server_tokens off;
+    access_log off;  # пути подписок и панели — секреты, а XHTTP пишет сотни МБ в день
 
     location $XHTTP_PATH/ {
         client_max_body_size 0;
@@ -1005,7 +1008,7 @@ do_update() {
   [[ -f "$ETC/panel.env" ]] && { setup_venv "$ROOT/panel" "${PANEL_DEPS[@]}"; write_panel_service; }
   write_agent_service
   [[ "$ROLE" == bridge ]] || write_nginx
-  [[ "$ROLE" == bridge ]] && install_geodata_timer
+  install_geodata_timer  # и мостам, и выходам: правила по geoip есть у всех
   open_firewall
   dns64_off
   systemctl daemon-reload
@@ -1336,6 +1339,7 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     root /var/www/xvpn;
     server_tokens off;
+    access_log off;  # пути подписок и панели — секреты, а XHTTP пишет сотни МБ в день
 
     location $XHTTP_PATH/ {
         client_max_body_size 0;

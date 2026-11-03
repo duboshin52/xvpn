@@ -57,15 +57,17 @@ MIN_DNS = int(conf.get("MIN_DNS", 2))          # меньше стольких A
 PATH_AFTER = int(conf.get("PATH_AFTER", 3))    # столько прогонов подряд путь мёртв — алерт
 STALLED_LIMIT = int(conf.get("STALLED_LIMIT", 10))  # свежих рукопожатий без ответа на мосту — алерт
 RESTART_GAP = int(conf.get("RESTART_GAP", 1800))    # автоперезапуск Xray на мосту не чаще, секунд
+PROBE_FROM = conf.get("PROBE_FROM", "")        # сервер в российской сети, с которого проверять входы
+PROBE_KEY = conf.get("PROBE_KEY", "canary")    # служебный ключ для этих проверок
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 
-def api(method, path, body=None):
+def api(method, path, body=None, timeout=20):
     req = urllib.request.Request(
         API + path, method=method,
         data=json.dumps(body).encode() if body is not None else None,
         headers={"X-CLI-Token": CLI_TOKEN, "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 
@@ -305,6 +307,30 @@ def main():
                    f"клиенты будут долбиться в них впустую.{fixed or ' Удали A-записи.'}")
         else:
             report("dns:dead", None)
+
+    # 3б. входы глазами клиента из российской сети: Xray-клиент на PROBE_FROM подключается по
+    # каждой ссылке подписки служебного ключа и качает 300 КБ. Ловит то, что с главного не видно:
+    # мост принимает рукопожатие и молчит, или TLS замерзает после ~20 КБ
+    src = next((s for s in servers if s["name"] == PROBE_FROM and s.get("online")), None)
+    if src:
+        try:
+            res = api("POST", f"/servers/{src['id']}/probe", {"key": PROBE_KEY}, timeout=120)["results"]
+        except Exception as e:
+            res = None
+            report("probe:run", f"проба входов с «{PROBE_FROM}» не запустилась: {e}"[:200])
+        if res is not None:
+            report("probe:run", None)
+            fails_n = state.setdefault("probe", {})  # имя входа -> сколько прогонов подряд не работает
+            by_ip = {(b.get("info") or {}).get("ip"): b for b in bridges}
+            for r in res:
+                if r.get("ok") is None:
+                    continue
+                n = fails_n[r["name"]] = 0 if r["ok"] else fails_n.get(r["name"], 0) + 1
+                report(f"probe:{r['name']}", f"вход «{r['name']}» из российской сети не работает: {r.get('err')}"
+                       if n >= 2 else None)
+                b = by_ip.get(r.get("host"))
+                if n >= 2 and b:
+                    heal(b, f"проба из РФ: {r.get('err')}")
 
     # 4. подписка отвечает (400/404 — норм: сервис жив, просто нет токена)
     if DOMAIN and SUB_PATH:
