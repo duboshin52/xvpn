@@ -14,6 +14,7 @@
 Алерты — в Telegram владельцу, только при смене состояния (упал/поднялся).
 Состояние: /etc/xvpn/canary.json. Настройки: /etc/xvpn/canary.env.
 """
+import contextlib
 import json
 import os
 import socket
@@ -310,6 +311,13 @@ def main():
         st = http_status(f"https://{DOMAIN}{SUB_PATH}/canary")
         report("sub:main", None if st in (400, 401, 403, 404) else
                f"подписка https://{DOMAIN} не отвечает (код {st})")
+        # публичный адрес подписки (прокси перед главным): через него же открывается мини-апп
+        with contextlib.suppress(Exception):
+            sub_host = api("GET", "/settings").get("sub_host", "")
+            if sub_host:
+                st = http_status(f"https://{sub_host}{SUB_PATH}/canary")
+                report("sub:public", None if st in (400, 401, 403, 404) else
+                       f"подписка https://{sub_host} не отвечает (код {st})")
         rc_host = ""
         for s in servers:
             rc = (s.get("info") or {}).get("ru_cdn") or {}

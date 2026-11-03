@@ -41,7 +41,6 @@ SUB_PATH = "/" + os.environ["SUB_PATH"].strip("/")
 DB_PATH = os.environ.get("DB_PATH", "/opt/xvpn/panel/xvpn.db")
 SUB_TITLE = os.environ.get("SUB_TITLE", "xvpn")
 SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL", "60"))
-WEBAPP_URL = f"https://{DOMAIN}{PANEL_PATH}/" if DOMAIN else ""
 HERE = os.path.dirname(os.path.abspath(__file__))
 GB = 1024 ** 3
 DAY = 86400
@@ -199,6 +198,13 @@ def key_state(k: dict) -> str:
     if k["limit_bytes"] and k["used_bytes"] >= k["limit_bytes"]:
         return "limit"
     return "active"
+
+
+def webapp_url() -> str:
+    """Мини-апп — по публичному адресу подписки (sub_host), если он задан: прокси перед
+    главным пропускает и панель. Иначе — по домену главного (DOMAIN)."""
+    host = setting("sub_host", "") or DOMAIN
+    return f"https://{host}{PANEL_PATH}/" if host else ""
 
 
 def key_out(k: dict) -> dict:
@@ -582,11 +588,11 @@ async def notify_admins(text: str):
 
 
 async def set_menu(uid: int):
-    if not bot or not WEBAPP_URL:
+    if not bot or not webapp_url():
         return
     with contextlib.suppress(Exception):
         await bot.set_chat_menu_button(chat_id=uid, menu_button=MenuButtonWebApp(
-            text="Панель", web_app=WebAppInfo(url=WEBAPP_URL)))
+            text="Панель", web_app=WebAppInfo(url=webapp_url())))
 
 
 def fmt_bytes(n: int) -> str:
@@ -603,7 +609,7 @@ async def cmd_start(m: Message):
         return await m.answer(f"Нет доступа. Ваш ID: <code>{m.from_user.id}</code>", parse_mode="HTML")
     await set_menu(m.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text="Открыть панель", web_app=WebAppInfo(url=WEBAPP_URL))]]) if WEBAPP_URL else None
+        text="Открыть панель", web_app=WebAppInfo(url=webapp_url()))]]) if webapp_url() else None
     await m.answer("Управление VPN.\n\n/status — серверы\n/keys — ключи\n"
                    "/newkey имя [дней] [ГБ] — новый ключ\n/admins, /addadmin ID [имя], /deladmin ID",
                    reply_markup=kb)
@@ -1009,6 +1015,24 @@ async def api_server_edit(sid: int, body: dict, u=Depends(owner)):
         qx("UPDATE servers SET enabled=? WHERE id=?", (int(bool(body["enabled"])), sid))
     if "cascade" in body:
         qx("UPDATE servers SET cascade=? WHERE id=?", (int(bool(body["cascade"])), sid))
+    if body.get("code"):
+        # новый адрес агента (например, ушли с домена через Cloudflare на IP): id сервера,
+        # привязки ключей и статистика остаются прежними
+        try:
+            c = parse_code(str(body["code"]))
+        except Exception:
+            raise HTTPException(400, "код подключения не распознан — скопируйте его целиком")
+        new = {"url": c["url"], "secret": c["secret"], "cert": None}
+        try:
+            if c["fp"]:
+                new["cert"] = await asyncio.to_thread(fetch_pinned_cert, c["url"], c["fp"])
+            info = await agent(new, "GET", "/info", timeout=40)
+        except Exception as e:
+            raise HTTPException(400, f"агент {c['url']} не отвечает: {type(e).__name__} {e}".strip())
+        if info.get("role", "exit") != s["role"]:
+            raise HTTPException(400, "по коду отвечает сервер другой роли — это не тот сервер?")
+        qx("UPDATE servers SET url=?, secret=?, cert=?, info=? WHERE id=?",
+           (new["url"], new["secret"], new["cert"], json.dumps(info), sid))
     if body.get("refresh_info"):
         qx("UPDATE servers SET info=? WHERE id=?", (json.dumps(await agent(s, "GET", "/info")), sid))
     asyncio.create_task(sync_now())
@@ -1034,7 +1058,7 @@ async def api_server_restart(sid: int, u=Depends(tg_user)):
 def api_settings(u=Depends(tg_user)):
     c = cluster_conf()
     return {"cdn": cdn_on(), "cluster": bool(c), "cluster_host": c["host"] if c else "",
-            "emergency": setting("emergency", "0") == "1"}
+            "emergency": setting("emergency", "0") == "1", "sub_host": setting("sub_host", "")}
 
 
 @app.patch(P + "/api/settings")

@@ -32,6 +32,7 @@ ${B}Серверы${N} (на главном сервере)
   xvpn servers                    серверы, роли, состояние, выходы каскада
   xvpn server add КОД [ИМЯ]       подключить сервер-выход или мост по коду
   xvpn server del ИМЯ|ID          убрать сервер из списка
+  xvpn server recode ИМЯ|ID КОД    новый адрес агента сервера (id, ключи и статистика сохраняются)
   xvpn server cascade ИМЯ|ID on|off   использовать ли сервер выходом для мостов
   xvpn server hide|show ИМЯ|ID    скрыть из подписок / вернуть
   xvpn server rename ИМЯ|ID НОВОЕ переименовать
@@ -233,9 +234,11 @@ case "$cmd" in
       hide|show) id=$(srv_id "${1:?ИМЯ|ID}")
         api PATCH "/servers/$id" "$([[ $sub == hide ]] && echo '{"enabled":0}' || echo '{"enabled":1}')" >/dev/null
         ok "$([[ $sub == hide ]] && echo 'Скрыт из подписок' || echo 'Возвращён в подписки')" ;;
+      recode) id=$(srv_id "${1:?ИМЯ|ID}"); [[ -n "${2:-}" ]] || die "xvpn server recode ИМЯ КОД"
+        api PATCH "/servers/$id" "$(jq -nc --arg c "$2" '{code:$c}')" >/dev/null; ok "Адрес агента «$1» обновлён" ;;
       rename) id=$(srv_id "${1:?ИМЯ|ID}"); [[ -n "${2:-}" ]] || die "xvpn server rename ИМЯ НОВОЕ"
         api PATCH "/servers/$id" "$(jq -nc --arg n "$2" '{name:$n}')" >/dev/null; ok "«$1» → «$2»" ;;
-      *) die "xvpn server add|del|rename|cascade|hide|show" ;;
+      *) die "xvpn server add|del|recode|rename|cascade|hide|show" ;;
     esac ;;
   sync) need_main; api POST /sync >/dev/null; ok "Синхронизировано" ;;
   subhost)
