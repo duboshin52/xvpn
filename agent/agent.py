@@ -163,6 +163,19 @@ def build_bridge(node: dict, users: list[dict], upstreams: list[dict]) -> dict:
             last,
         ]},
     }
+    fwd = node.get("main_fwd") or {}
+    if fwd.get("port") and fwd.get("target") and exits:
+        # прокси перед главным (Caddy на этом мосту) ходит к нему через туннель к выходу:
+        # прямое TLS из РФ на зарубежный хостинг замерзает после ~20 КБ ответа.
+        # Порт только для локальных контейнеров: снаружи — блок, мост не светит связь с главным
+        host, _, port = str(fwd["target"]).rpartition(":")
+        cfg["inbounds"].append(
+            {"tag": "main-fwd", "listen": fwd.get("listen", "0.0.0.0"), "port": int(fwd["port"]),
+             "protocol": "dokodemo-door", "settings": {"address": host, "port": int(port), "network": "tcp"}})
+        cfg["routing"]["rules"][1:1] = [
+            {"type": "field", "inboundTag": ["main-fwd"], "source": ["127.0.0.0/8", "172.16.0.0/12"],
+             **{k: v for k, v in last.items() if k in ("outboundTag", "balancerTag")}},
+            {"type": "field", "inboundTag": ["main-fwd"], "outboundTag": "block"}]
     if node.get("ru_cdn") and node.get("xhttp_path"):
         # вход через российский CDN: клиент → CDN → nginx моста → этот сокет → выходы.
         # Для сети клиента мост не виден: оператор видит только адрес CDN
