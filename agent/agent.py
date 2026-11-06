@@ -502,6 +502,8 @@ def status():
         extra["exits"] = exits_health()
         extra["stalled"] = stalled_handshakes(int(node.get("port", 443)))
         extra["watchdog"] = load_watchdog()
+        # маскировка под свой сайт на этом сервере: сертификат может быть самодельным
+        extra["local_mask"] = str((node.get("reality") or {}).get("dest", "")).startswith("127.")
     return extra | {
         "cpu": psutil.cpu_percent(interval=0.3), "cores": psutil.cpu_count(),
         "load": os.getloadavg(),

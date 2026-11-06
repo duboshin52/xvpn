@@ -85,11 +85,16 @@ def notify(text):
         print("telegram notify failed:", e)
 
 
-def tls_cert_ok(ip: str, sni: str, timeout=8) -> tuple[bool, str]:
+def tls_cert_ok(ip: str, sni: str, timeout=8, verify=True) -> tuple[bool, str]:
     """Рукопожатие с SNI маскировки: Reality должен прозрачно отдать
-    настоящий сертификат dest-сайта (проверяем цепочку и имя)."""
+    настоящий сертификат dest-сайта (проверяем цепочку и имя).
+    verify=False — мост маскируется под свой сайт с самодельным сертификатом:
+    достаточно, что TLS вообще отвечает."""
     try:
         ctx = ssl.create_default_context()
+        if not verify:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
         with socket.create_connection((ip, 443), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=sni) as s:
                 cert = s.getpeercert()
@@ -258,7 +263,7 @@ def main():
             cl_sni = sni  # у всех мостов в кластере один SNI
         if not sni:
             continue
-        ok, det = tls_cert_ok(ip, sni)
+        ok, det = tls_cert_ok(ip, sni, verify=not (s.get("status") or {}).get("local_mask"))
         mask[ip] = {"ok": ok, "ts": now}
         report(f"mask:{ip}", None if ok else
                f"маскировка моста «{s['name']}» ({ip}) сломана: {det}. "
@@ -286,8 +291,11 @@ def main():
         # мёртвые IP в DNS: не принадлежат живым мостам и не отвечают по маскировке
         suspicious = []
         strikes = state.setdefault("dead", {})  # ip -> сколько прогонов подряд мёртв
+        # второй IP моста тоже попадает сюда: если какой-то мост маскируется под свой сайт
+        # с самодельным сертификатом, «жив» значит «TLS отвечает»
+        local = any((s.get("status") or {}).get("local_mask") for s in bridges)
         for ip in got - live:
-            ok, _ = tls_cert_ok(ip, cl_sni or "ya.ru")
+            ok, _ = tls_cert_ok(ip, cl_sni or "ya.ru", verify=not local)
             mask[ip] = {"ok": ok, "ts": now}
             if not ok:
                 suspicious.append(ip)
